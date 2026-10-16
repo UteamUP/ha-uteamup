@@ -12,6 +12,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFl
 from homeassistant.const import CONF_API_KEY, CONF_SCAN_INTERVAL, CONF_URL, CONF_VERIFY_SSL
 from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.selector import TextSelector, TextSelectorConfig, TextSelectorType
 
 from . import create_client
 from .api import (
@@ -46,7 +47,9 @@ CREDENTIALS_SCHEMA = {
 def _connection_schema(defaults: Mapping[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
-            vol.Required(CONF_URL, default=defaults.get(CONF_URL, DEFAULT_BASE_URL)): cv.url,
+            vol.Required(CONF_URL, default=defaults.get(CONF_URL, DEFAULT_BASE_URL)): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.URL)
+            ),
             **CREDENTIALS_SCHEMA,
             vol.Optional(CONF_VERIFY_SSL, default=defaults.get(CONF_VERIFY_SSL, True)): cv.boolean,
         }
@@ -59,6 +62,12 @@ class UteamupConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     async def _validate(self, data: dict[str, Any], errors: dict[str, str]) -> str | None:
+        # Validated here, not in the schema: the frontend cannot render a cv.url validator.
+        try:
+            cv.url(data[CONF_URL])
+        except vol.Invalid:
+            errors[CONF_URL] = "invalid_url"
+            return None
         try:
             return await create_client(self.hass, data).async_login()
         except UteamupMcpKeyError:

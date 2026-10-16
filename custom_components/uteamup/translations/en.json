@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect UteamUP",
-        "description": "Use a tenant API key that is not MCP-enabled. Create it in UteamUP under Settings > API keys and give it a role with the permissions Home Assistant should have. The key acts as the person who created it, so they need those permissions too.",
+        "description": "Use a tenant API key that is not MCP-enabled. Create it in UteamUP under Tenant Management > API Keys and give it a role with the permissions Home Assistant should have. The key acts as the person who created it, so they need those permissions too.",
         "data": {
           "url": "API address",
           "api_key": "API key",
@@ -39,7 +39,8 @@
       "plan_required": "The company's UteamUP plan is not active yet.",
       "rate_limited": "Too many sign-in attempts. Wait a few minutes and try again.",
       "cannot_connect": "Could not reach UteamUP at that address.",
-      "unknown": "Unexpected error. See the Home Assistant log."
+      "unknown": "Unexpected error. See the Home Assistant log.",
+      "invalid_url": "Enter the full API address, starting with https."
     },
     "abort": {
       "already_configured": "This UteamUP company is already connected.",

@@ -5,11 +5,13 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+import voluptuous_serialize
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_API_KEY, CONF_SCAN_INTERVAL, CONF_URL, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import config_validation as cv
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
 
 from custom_components.uteamup.const import (
@@ -33,6 +35,29 @@ def no_setup():
 
 async def _start(hass: HomeAssistant):
     return await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+
+
+def _assert_frontend_can_render(result) -> None:
+    """The frontend gets the form through the same serializer; an unknown validator is an HTTP 500."""
+    voluptuous_serialize.convert(result["data_schema"], custom_serializer=cv.custom_serializer)
+
+
+async def test_every_form_can_be_rendered(hass: HomeAssistant, config_entry) -> None:
+    config_entry.add_to_hass(hass)
+    _assert_frontend_can_render(await _start(hass))
+    _assert_frontend_can_render(await config_entry.start_reauth_flow(hass))
+    _assert_frontend_can_render(await config_entry.start_reconfigure_flow(hass))
+    _assert_frontend_can_render(await hass.config_entries.options.async_init(config_entry.entry_id))
+
+
+async def test_user_flow_rejects_an_address_that_is_not_a_url(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+) -> None:
+    result = await hass.config_entries.flow.async_configure(
+        (await _start(hass))["flow_id"], {**USER_INPUT, CONF_URL: "api.uteamup.com"}
+    )
+    assert result["errors"] == {CONF_URL: "invalid_url"}
+    assert aioclient_mock.call_count == 0
 
 
 async def test_user_flow_creates_entry_for_the_keys_tenant(hass: HomeAssistant, aioclient_mock: AiohttpClientMocker) -> None:
