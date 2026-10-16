@@ -1,0 +1,58 @@
+blueprint:
+  name: Push a sensor to a UteamUP meter
+  description: >-
+    Records the value of a Home Assistant sensor as a reading on a UteamUP asset meter
+    at a fixed interval. Unknown and unavailable states are skipped. Keep the interval
+    coarse: every reading is stored permanently in UteamUP.
+  domain: automation
+  source_url: https://github.com/UteamUP/ha-uteamup/blob/main/blueprints/automation/uteamup/push_sensor_to_meter.yaml
+  input:
+    source_sensor:
+      name: Sensor
+      selector:
+        entity:
+          domain: sensor
+    asset_guid:
+      name: Asset GUID
+      description: The GUID of the UteamUP asset that owns the meter.
+      selector:
+        text:
+    attribute_definition_guid:
+      name: Meter attribute GUID
+      description: The GUID of the meter attribute definition on that asset type.
+      selector:
+        text:
+    interval_hours:
+      name: Interval (hours)
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 24
+          unit_of_measurement: h
+
+mode: single
+
+variables:
+  interval_hours: !input interval_hours
+  source_sensor_id: !input source_sensor
+
+triggers:
+  - trigger: time_pattern
+    minutes: "0"
+
+conditions:
+  - condition: template
+    value_template: "{{ now().hour % (interval_hours | int(1)) == 0 }}"
+  - condition: template
+    value_template: >-
+      {{ states(source_sensor_id) not in ['unknown', 'unavailable', 'none', '']
+         and states(source_sensor_id) | is_number }}
+
+actions:
+  - action: uteamup.record_meter_reading
+    data:
+      asset_guid: !input asset_guid
+      attribute_definition_guid: !input attribute_definition_guid
+      value: "{{ states(source_sensor_id) | float }}"
+      notes: "Home Assistant: {{ source_sensor_id }}"

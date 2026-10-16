@@ -1,0 +1,219 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect UteamUP",
+        "description": "Use a tenant API key that is not MCP-enabled. Create it in UteamUP under Settings > API keys and give it a role with the permissions Home Assistant should have. The key acts as the person who created it, so they need those permissions too.",
+        "data": {
+          "url": "API address",
+          "api_key": "API key",
+          "api_secret": "API secret",
+          "verify_ssl": "Verify the SSL certificate"
+        },
+        "data_description": {
+          "url": "https://api.uteamup.com unless your company uses another UteamUP environment.",
+          "verify_ssl": "Turn off only for a local development server with a self-signed certificate."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in to UteamUP again",
+        "description": "UteamUP no longer accepts the saved API key. It may have been rotated, disabled or expired. Enter a key for the same company.",
+        "data": {
+          "api_key": "API key",
+          "api_secret": "API secret"
+        }
+      },
+      "reconfigure": {
+        "title": "Change the UteamUP connection",
+        "data": {
+          "url": "API address",
+          "api_key": "API key",
+          "api_secret": "API secret",
+          "verify_ssl": "Verify the SSL certificate"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "UteamUP rejected the API key or secret.",
+      "mcp_key_not_allowed": "This key is MCP-enabled. Create a key with MCP access turned off for Home Assistant.",
+      "plan_required": "The company's UteamUP plan is not active yet.",
+      "rate_limited": "Too many sign-in attempts. Wait a few minutes and try again.",
+      "cannot_connect": "Could not reach UteamUP at that address.",
+      "unknown": "Unexpected error. See the Home Assistant log."
+    },
+    "abort": {
+      "already_configured": "This UteamUP company is already connected.",
+      "reauth_successful": "Signed in again.",
+      "reconfigure_successful": "Connection updated.",
+      "wrong_tenant": "That key belongs to a different UteamUP company."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "UteamUP options",
+        "data": {
+          "scan_interval": "Refresh interval (seconds)",
+          "enable_webhooks": "Receive live events",
+          "assignee_guid": "Only list work orders assigned to (user GUID)"
+        },
+        "data_description": {
+          "enable_webhooks": "Needs the Enterprise plan and a public Home Assistant URL, such as Home Assistant Cloud. Polling continues either way.",
+          "assignee_guid": "Leave empty to list every open work order."
+        }
+      }
+    },
+    "error": {
+      "invalid_guid": "Enter a user GUID, or leave the field empty."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "open_work_orders": { "name": "Open work orders", "unit_of_measurement": "work orders" },
+      "in_progress_work_orders": { "name": "Work orders in progress", "unit_of_measurement": "work orders" },
+      "on_hold_work_orders": { "name": "Work orders on hold", "unit_of_measurement": "work orders" },
+      "overdue_work_orders": { "name": "Overdue work orders", "unit_of_measurement": "work orders" },
+      "stock_alerts": {
+        "name": "Stock alerts",
+        "unit_of_measurement": "alerts",
+        "state_attributes": {
+          "critical": { "name": "Critical" },
+          "low_stock": { "name": "Low stock" },
+          "stockout": { "name": "Stockout" },
+          "action_required": { "name": "Action required" }
+        }
+      },
+      "iot_alerts": { "name": "Unacknowledged IoT alerts", "unit_of_measurement": "alerts" }
+    },
+    "binary_sensor": {
+      "stock_critical": { "name": "Critical stock" },
+      "iot_alert_active": { "name": "IoT alert" }
+    },
+    "calendar": {
+      "work_orders": { "name": "Work orders" }
+    },
+    "todo": {
+      "open_work_orders_list": { "name": "Open work orders" }
+    }
+  },
+  "issues": {
+    "webhook_url_unavailable": {
+      "title": "UteamUP live events need a public URL",
+      "description": "{title} cannot receive live events because Home Assistant has no external URL, and UteamUP does not deliver to local network addresses. Set up Home Assistant Cloud or an external URL. Until then, the entities update on the refresh interval."
+    },
+    "webhooks_not_allowed": {
+      "title": "UteamUP did not allow live events",
+      "description": "{title} could not register a webhook. Webhooks need the Enterprise plan, and the API key's role and its creator need Webhook.Manage. Until then, the entities update on the refresh interval."
+    }
+  },
+  "exceptions": {
+    "entry_required": { "message": "No loaded UteamUP connection matches this action." },
+    "entry_ambiguous": { "message": "Several UteamUP companies are connected. Choose one with config_entry_id." },
+    "forbidden": { "message": "UteamUP did not allow this. Check the API key's role and its creator's permissions. ({error})" },
+    "not_found": { "message": "UteamUP could not find that record in this company. ({error})" },
+    "api_error": { "message": "UteamUP rejected the request: {error}" }
+  },
+  "services": {
+    "create_work_order": {
+      "name": "Create work order",
+      "description": "Creates a work order in UteamUP.",
+      "fields": {
+        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
+        "name": { "name": "Name", "description": "Short title of the work." },
+        "description": { "name": "Description", "description": "What needs doing." },
+        "priority": { "name": "Priority", "description": "1 low, 2 medium, 3 high, 4 urgent, 5 critical." },
+        "due": { "name": "Due", "description": "When it should be done. Defaults to tomorrow." },
+        "asset_guid": { "name": "Asset GUID", "description": "The asset the work is on." },
+        "assignee_guid": { "name": "Assignee GUID", "description": "The user who should do it." }
+      }
+    },
+    "create_quick_report": {
+      "name": "Report a problem",
+      "description": "Files a quick report, which becomes a work order in UteamUP.",
+      "fields": {
+        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
+        "description": { "name": "Description", "description": "What is wrong." },
+        "severity": { "name": "Severity", "description": "How serious it is." },
+        "asset_guid": { "name": "Asset GUID", "description": "The asset with the problem." },
+        "tags": { "name": "Tags", "description": "Tags to add to the report." }
+      }
+    },
+    "set_work_order_status": {
+      "name": "Set work order status",
+      "description": "Moves a work order to another status.",
+      "fields": {
+        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
+        "work_order_guid": { "name": "Work order GUID", "description": "The work order to change." },
+        "status": { "name": "Status", "description": "The new status." },
+        "expected_status": { "name": "Only if currently", "description": "Change it only when the work order still has this status." }
+      }
+    },
+    "complete_work_order": {
+      "name": "Complete work order",
+      "description": "Completes a work order in UteamUP.",
+      "fields": {
+        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
+        "work_order_guid": { "name": "Work order GUID", "description": "The work order to complete." },
+        "notes": { "name": "Notes", "description": "Saved as the completion report." }
+      }
+    },
+    "set_asset_state": {
+      "name": "Set asset operational state",
+      "description": "Records that an asset is online, offline, under maintenance and so on.",
+      "fields": {
+        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
+        "asset_guid": { "name": "Asset GUID", "description": "The asset." },
+        "state": { "name": "State", "description": "Its new operational state." },
+        "reason": { "name": "Reason", "description": "Why it changed." }
+      }
+    },
+    "run_pm_schedule": {
+      "name": "Run preventive maintenance now",
+      "description": "Creates the work order from a preventive maintenance schedule immediately.",
+      "fields": {
+        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
+        "schedule_guid": { "name": "Schedule GUID", "description": "The work order template schedule to run." }
+      }
+    },
+    "record_meter_reading": {
+      "name": "Record meter reading",
+      "description": "Adds a reading to an asset meter in UteamUP. Every reading is kept permanently.",
+      "fields": {
+        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
+        "asset_guid": { "name": "Asset GUID", "description": "The asset that owns the meter." },
+        "attribute_definition_guid": { "name": "Meter attribute GUID", "description": "The meter attribute on that asset's type." },
+        "value": { "name": "Value", "description": "The reading." },
+        "timestamp": { "name": "Taken at", "description": "When the reading was taken. Defaults to now." },
+        "notes": { "name": "Notes", "description": "Shown with the reading." }
+      }
+    }
+  },
+  "selector": {
+    "severity": {
+      "options": { "low": "Low", "medium": "Medium", "high": "High", "critical": "Critical" }
+    },
+    "work_order_status": {
+      "options": {
+        "not_started": "Not started",
+        "pending": "Pending",
+        "in_progress": "In progress",
+        "on_hold": "On hold",
+        "completed": "Completed",
+        "cancelled": "Cancelled"
+      }
+    },
+    "asset_state": {
+      "options": {
+        "online": "Online",
+        "offline": "Offline",
+        "standby": "Standby",
+        "under_maintenance": "Under maintenance",
+        "degraded": "Degraded",
+        "lost": "Lost",
+        "stolen": "Stolen",
+        "in_transit": "In transit",
+        "in_storage": "In storage"
+      }
+    }
+  }
+}

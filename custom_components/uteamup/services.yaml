@@ -1,0 +1,148 @@
+create_work_order:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: uteamup
+    name:
+      required: true
+      selector:
+        text:
+    description:
+      selector:
+        text:
+          multiline: true
+    priority:
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 5
+    due:
+      selector:
+        datetime:
+    asset_guid:
+      selector:
+        text:
+    assignee_guid:
+      selector:
+        text:
+
+create_quick_report:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: uteamup
+    description:
+      required: true
+      selector:
+        text:
+          multiline: true
+    severity:
+      selector:
+        select:
+          translation_key: severity
+          options: [low, medium, high, critical]
+    asset_guid:
+      selector:
+        text:
+    tags:
+      selector:
+        text:
+          multiple: true
+
+set_work_order_status:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: uteamup
+    work_order_guid:
+      required: true
+      selector:
+        text:
+    status:
+      required: true
+      selector:
+        select:
+          translation_key: work_order_status
+          options: [not_started, pending, in_progress, on_hold, completed, cancelled]
+    expected_status:
+      selector:
+        select:
+          translation_key: work_order_status
+          options: [not_started, pending, in_progress, on_hold, completed, cancelled]
+
+complete_work_order:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: uteamup
+    work_order_guid:
+      required: true
+      selector:
+        text:
+    notes:
+      selector:
+        text:
+          multiline: true
+
+set_asset_state:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: uteamup
+    asset_guid:
+      required: true
+      selector:
+        text:
+    state:
+      required: true
+      selector:
+        select:
+          translation_key: asset_state
+          options: [online, offline, standby, under_maintenance, degraded, lost, stolen, in_transit, in_storage]
+    reason:
+      selector:
+        text:
+
+run_pm_schedule:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: uteamup
+    schedule_guid:
+      required: true
+      selector:
+        text:
+
+record_meter_reading:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: uteamup
+    asset_guid:
+      required: true
+      selector:
+        text:
+    attribute_definition_guid:
+      required: true
+      selector:
+        text:
+    value:
+      required: true
+      selector:
+        number:
+          mode: box
+          step: any
+    timestamp:
+      selector:
+        datetime:
+    notes:
+      selector:
+        text:

@@ -1,0 +1,275 @@
+"""Async client for the UteamUP REST API, authenticated with a tenant API key."""
+
+from __future__ import annotations
+
+import base64
+import json
+import time
+from datetime import datetime
+from typing import Any
+
+import aiohttp
+
+TOKEN_REFRESH_MARGIN = 300
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+
+class UteamupError(Exception):
+    """Base error for the UteamUP client."""
+
+
+class UteamupConnectionError(UteamupError):
+    """The API could not be reached or answered with a server error."""
+
+
+class UteamupAuthError(UteamupError):
+    """The API key or secret was rejected."""
+
+
+class UteamupMcpKeyError(UteamupAuthError):
+    """The key is MCP-enabled, and MCP keys cannot sign in to the REST API."""
+
+
+class UteamupPlanError(UteamupError):
+    """The tenant's paid plan is not active yet."""
+
+
+class UteamupForbiddenError(UteamupError):
+    """The key's role, its audit actor or the tenant's plan does not allow the call."""
+
+
+class UteamupNotFoundError(UteamupError):
+    """The record does not exist in this tenant."""
+
+
+class UteamupRateLimitError(UteamupError):
+    """UteamUP asked the client to slow down."""
+
+    def __init__(self, retry_after: int | None) -> None:
+        super().__init__(f"Rate limited; retry after {retry_after} s")
+        self.retry_after = retry_after
+
+
+class UteamupApiError(UteamupError):
+    """The API rejected the request (validation or conflict)."""
+
+
+def _jwt_claims(token: str) -> dict[str, Any]:
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload))
+
+
+def _retry_after(response: aiohttp.ClientResponse) -> int | None:
+    value = response.headers.get("Retry-After")
+    return int(value) if value and value.isdigit() else None
+
+
+async def _error_message(response: aiohttp.ClientResponse) -> str:
+    text = await response.text()
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return text or f"HTTP {response.status}"
+    if isinstance(body, dict):
+        return str(body.get("message") or body.get("error") or body.get("title") or body)
+    return str(body)
+
+
+class UteamupClient:
+    """Talks to one UteamUP tenant with a non-MCP tenant API key."""
+
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        base_url: str,
+        api_key: str,
+        api_secret: str,
+        tenant_guid: str | None = None,
+    ) -> None:
+        self._session = session
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._tenant_guid = tenant_guid
+        self._token: str | None = None
+        self._expires_at = 0.0
+
+    @property
+    def tenant_guid(self) -> str | None:
+        """The tenant the key belongs to, known after the first login."""
+        return self._tenant_guid
+
+    async def async_login(self) -> str:
+        """Exchange the key and secret for a JWT and return the key's tenant GUID."""
+        body: dict[str, Any] = {"apiKey": self._api_key, "secret": self._api_secret}
+        if self._tenant_guid:
+            body["tenantGuid"] = self._tenant_guid
+        try:
+            async with self._session.post(
+                f"{self._base_url}/api/auth/apikey-login", json=body, timeout=REQUEST_TIMEOUT
+            ) as response:
+                if response.status == 429:
+                    raise UteamupRateLimitError(_retry_after(response))
+                if response.status == 400:
+                    message = await _error_message(response)
+                    if "MCP" in message:
+                        raise UteamupMcpKeyError(message)
+                    raise UteamupAuthError(message)
+                if response.status == 401:
+                    raise UteamupAuthError(await _error_message(response))
+                if response.status >= 400:
+                    raise UteamupConnectionError(f"Login failed with HTTP {response.status}")
+                token = (await response.json())["accessToken"]
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise UteamupConnectionError(str(err)) from err
+
+        claims = _jwt_claims(token)
+        self._token = token
+        self._expires_at = float(claims.get("exp", time.time() + 3600))
+        self._tenant_guid = str(claims["TenantGuid"])
+        return self._tenant_guid
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: Any = None,
+        form: aiohttp.FormData | None = None,
+        retry_auth: bool = True,
+    ) -> Any:
+        if self._token is None or time.time() > self._expires_at - TOKEN_REFRESH_MARGIN:
+            await self.async_login()
+        headers = {"Authorization": f"Bearer {self._token}", "X-Tenant-Guid": str(self._tenant_guid)}
+        if method != "GET":
+            # The API's CSRF guard requires this header on every state-changing request.
+            headers["X-Requested-With"] = "XMLHttpRequest"
+        try:
+            async with self._session.request(
+                method,
+                f"{self._base_url}{path}",
+                params=params,
+                json=json_body,
+                data=form,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            ) as response:
+                if response.status == 401 and retry_auth:
+                    self._token = None
+                    return await self._request(
+                        method, path, params=params, json_body=json_body, form=form, retry_auth=False
+                    )
+                if response.status == 401:
+                    raise UteamupAuthError(await _error_message(response))
+                if response.status == 402:
+                    raise UteamupPlanError(await _error_message(response))
+                if response.status == 403:
+                    raise UteamupForbiddenError(f"{method} {path} is not allowed for this API key")
+                if response.status == 404:
+                    raise UteamupNotFoundError(await _error_message(response))
+                if response.status == 429:
+                    raise UteamupRateLimitError(_retry_after(response))
+                if response.status >= 500:
+                    raise UteamupConnectionError(f"{method} {path} failed with HTTP {response.status}")
+                if response.status >= 400:
+                    raise UteamupApiError(await _error_message(response))
+                text = await response.text()
+                return json.loads(text) if text else None
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise UteamupConnectionError(str(err)) from err
+
+    async def async_get_analytics_summary(self, timeframe: str = "30d") -> dict[str, Any]:
+        return await self._request("GET", "/api/analytics/summary", params={"timeframe": timeframe})
+
+    async def async_get_stock_alert_summary(self) -> dict[str, Any]:
+        return await self._request("GET", "/api/stock/alerts/summary")
+
+    async def async_get_iot_alerts(self) -> dict[str, Any]:
+        return await self._request(
+            "GET", "/api/iot/alerts", params={"unacknowledgedOnly": "true", "page": 1, "pageSize": 100}
+        )
+
+    async def async_get_open_work_orders(self) -> dict[str, Any]:
+        return await self._request(
+            "GET", "/api/workorder", params={"openOnly": "true", "page": 1, "pageSize": 100}
+        )
+
+    async def async_get_work_order_calendar(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return await self._request(
+            "GET",
+            "/api/workorder/calendar",
+            params={"startDate": start.isoformat(), "endDate": end.isoformat()},
+        )
+
+    async def async_create_work_order(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", "/api/workorder", json_body=body)
+
+    async def async_set_work_order_status(
+        self, work_order_guid: str, status: int, expected_status: int | None = None
+    ) -> dict[str, Any]:
+        params = {"expectedStatus": expected_status} if expected_status is not None else None
+        return await self._request(
+            "PUT", f"/api/workorder/by-guid/{work_order_guid}/status/{status}", params=params
+        )
+
+    async def async_complete_work_order(self, work_order_guid: str, notes: str | None = None) -> dict[str, Any]:
+        body = {"report": {"description": notes}} if notes else {}
+        return await self._request("POST", f"/api/workorder/by-guid/{work_order_guid}/complete", json_body=body)
+
+    async def async_create_quick_report(
+        self,
+        description: str,
+        severity: str | None = None,
+        asset_guid: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        form = aiohttp.FormData()
+        form.add_field("Description", description)
+        if severity:
+            form.add_field("Severity", severity.upper())
+        if asset_guid:
+            form.add_field("AssetGuid", asset_guid)
+        for tag in tags or []:
+            form.add_field("Tags", tag)
+        return await self._request("POST", "/api/quickreport", form=form)
+
+    async def async_set_asset_state(self, asset_guid: str, state: str, reason: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"toState": state}
+        if reason:
+            body["reason"] = reason
+        return await self._request("PUT", f"/api/assetstate/asset/by-guid/{asset_guid}/operational", json_body=body)
+
+    async def async_run_pm_schedule(self, schedule_guid: str) -> dict[str, Any]:
+        return await self._request("POST", f"/api/workordertemplate/schedules/{schedule_guid}/runnow")
+
+    async def async_record_meter_reading(
+        self,
+        asset_guid: str,
+        attribute_definition_guid: str,
+        value: float,
+        timestamp: datetime | None = None,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"attributeDefinitionGuid": attribute_definition_guid, "readingValue": value}
+        if timestamp:
+            body["readingTimestamp"] = timestamp.isoformat()
+        if notes:
+            body["notes"] = notes
+        return await self._request("POST", f"/api/assets/{asset_guid}/meter-readings", json_body=body)
+
+    async def async_list_webhook_subscriptions(self) -> list[dict[str, Any]]:
+        return await self._request("GET", "/api/webhooks/subscriptions")
+
+    async def async_create_webhook_subscription(
+        self, name: str, url: str, secret: str, events: list[str]
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/webhooks/subscriptions",
+            json_body={"name": name, "url": url, "secret": secret, "events": events, "isActive": True},
+        )
+
+    async def async_delete_webhook_subscription(self, subscription_guid: str) -> None:
+        await self._request("DELETE", f"/api/webhooks/subscriptions/{subscription_guid}")
