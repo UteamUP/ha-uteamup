@@ -110,3 +110,7 @@ uv venv --python 3.13 .venv
 uv pip install --python .venv/bin/python -r requirements_test.txt
 .venv/bin/pytest
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
