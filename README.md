@@ -111,6 +111,11 @@ uv pip install --python .venv/bin/python -r requirements_test.txt
 .venv/bin/pytest
 ```
 
+`tests/live` runs the integration against a real UteamUP API and is skipped unless
+`UTEAMUP_LIVE_KEY_FILE` points at a JSON file with `base`, `tenant`, `apiKey`, `secret`,
+`assetGuid` and `attributeDefinitionGuid`. Use a development API: it creates a quick report,
+a meter reading and a temporary webhook subscription.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

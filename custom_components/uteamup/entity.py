@@ -13,11 +13,15 @@ from .coordinator import UteamupCoordinator
 
 
 def parse_api_datetime(value: str | None) -> datetime | None:
-    """UteamUP stores times in UTC and may omit the offset."""
+    """UteamUP stores times in UTC and may omit the offset.
+
+    An unset .NET date arrives as 0001-01-01, which overflows when Home Assistant converts it
+    to local time, so any date before 1900 means "no date".
+    """
     parsed = dt_util.parse_datetime(value) if value else None
-    if parsed is not None and parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
+    if parsed is None or parsed.year < 1900:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 class UteamupEntity(CoordinatorEntity[UteamupCoordinator]):

@@ -14,7 +14,19 @@ from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClien
 from custom_components.uteamup.const import CONF_ASSIGNEE_GUID, CONF_ENABLE_WEBHOOKS, DOMAIN
 from custom_components.uteamup.diagnostics import async_get_config_entry_diagnostics
 
-from .conftest import API_KEY, API_SECRET, BASE, TENANT, WORK_ORDER_GUID, mock_login, mock_reads, setup_entry
+from .conftest import (
+    ANALYTICS,
+    API_KEY,
+    API_SECRET,
+    BASE,
+    IOT,
+    STOCK,
+    TENANT,
+    WORK_ORDER_GUID,
+    mock_login,
+    mock_reads,
+    setup_entry,
+)
 
 
 def _state(hass: HomeAssistant, platform: str, key: str):
@@ -161,3 +173,26 @@ async def test_unload(hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, 
     await setup_entry(hass, config_entry)
     assert await hass.config_entries.async_unload(config_entry.entry_id)
     assert config_entry.state is ConfigEntryState.NOT_LOADED
+
+
+async def test_unset_dotnet_dates_do_not_break_calendar_or_todo(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, config_entry
+) -> None:
+    """A work order without dates arrives as 0001-01-01, which overflows local-time conversion."""
+    mock_login(aioclient_mock)
+    unset = "0001-01-01T00:00:00"
+    for path, body in (("/api/analytics/summary", ANALYTICS), ("/api/stock/alerts/summary", STOCK), ("/api/iot/alerts", IOT)):
+        aioclient_mock.get(f"{BASE}{path}", json=body)
+    aioclient_mock.get(
+        f"{BASE}/api/workorder",
+        json={"items": [{"guid": WORK_ORDER_GUID, "ticketId": "WO-1", "name": "Undated", "startDate": unset, "dueDate": unset}]},
+    )
+    await setup_entry(hass, config_entry)
+
+    assert _state(hass, "calendar", "work_orders").state == "off"
+    todo = _state(hass, "todo", "open_work_orders_list")
+    assert todo.state == "1"
+    items = await hass.services.async_call(
+        "todo", "get_items", target={"entity_id": todo.entity_id}, blocking=True, return_response=True
+    )
+    assert "due" not in items[todo.entity_id]["items"][0]

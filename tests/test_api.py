@@ -110,5 +110,6 @@ async def test_quick_report_is_sent_as_a_form(hass: HomeAssistant, aioclient_moc
     assert result["ticketId"] == "QR-1"
     _, _, body, headers = aioclient_mock.mock_calls[-1]
     assert headers["X-Requested-With"] == "XMLHttpRequest"
+    assert body.is_multipart, "the endpoint answers 415 to a URL-encoded form"
     fields = {field[0]["name"]: field[2] for field in body._fields}
     assert fields == {"Description": "Leak under sink", "Severity": "HIGH", "Tags": "plumbing"}

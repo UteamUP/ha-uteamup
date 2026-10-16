@@ -225,7 +225,8 @@ class UteamupClient:
         asset_guid: str | None = None,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        form = aiohttp.FormData()
+        # The endpoint only accepts multipart; without a file aiohttp would send a URL-encoded form (HTTP 415).
+        form = aiohttp.FormData(default_to_multipart=True)
         form.add_field("Description", description)
         if severity:
             form.add_field("Severity", severity.upper())
