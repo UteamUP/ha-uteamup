@@ -16,7 +16,7 @@ from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClien
 from custom_components.uteamup.const import CONF_API_SECRET, CONF_ENABLE_WEBHOOKS, CONF_TENANT_GUID, DOMAIN
 
 BASE = "https://api.example.test"
-TENANT = "3e1cd135-07d1-46ff-8f5f-549da5390e78"
+TENANT = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 API_KEY = "a" * 32
 API_SECRET = "b" * 64
 WORK_ORDER_GUID = "11111111-1111-4111-8111-111111111111"
@@ -80,7 +80,7 @@ def mock_reads(aioclient_mock: AiohttpClientMocker, **overrides) -> None:
 def config_entry() -> MockConfigEntry:
     return MockConfigEntry(
         domain=DOMAIN,
-        title="UteamUP 3e1cd135",
+        title="UteamUP 0a1b2c3d",
         unique_id=TENANT,
         data={
             CONF_URL: BASE,

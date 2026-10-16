@@ -44,7 +44,7 @@ async def test_user_flow_creates_entry_for_the_keys_tenant(hass: HomeAssistant, 
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["result"].unique_id == TENANT
-    assert result["title"] == "UteamUP 3e1cd135"
+    assert result["title"] == "UteamUP 0a1b2c3d"
     assert result["data"] == {**USER_INPUT, CONF_TENANT_GUID: TENANT}
     login_body = aioclient_mock.mock_calls[0][2]
     assert login_body == {"apiKey": API_KEY, "secret": API_SECRET}
