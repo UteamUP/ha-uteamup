@@ -11,7 +11,7 @@
           "verify_ssl": "Verify the SSL certificate"
         },
         "data_description": {
-          "url": "https://api.uteamup.com unless your company uses another UteamUP environment.",
+          "url": "Keep the default address unless your company uses another UteamUP environment.",
           "verify_ssl": "Turn off only for a local development server with a self-signed certificate."
         }
       },
