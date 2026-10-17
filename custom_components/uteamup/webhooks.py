@@ -61,10 +61,13 @@ async def _cloudhook_url(hass: HomeAssistant, entry: UteamupConfigEntry, webhook
         return None
     from homeassistant.components import cloud  # noqa: PLC0415 - only when Home Assistant Cloud is loaded
 
-    if not (cloud.async_active_subscription(hass) and cloud.async_is_connected(hass)):
+    if not cloud.async_active_subscription(hass):
         return None
+    # The cloudhook URL is stable, so it stays valid while Cloud reconnects after a restart.
     if url := entry.data.get(CONF_CLOUDHOOK_URL):
         return url
+    if not cloud.async_is_connected(hass):
+        return None
     url = await cloud.async_create_cloudhook(hass, webhook_id)
     hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CLOUDHOOK_URL: url})
     return url
@@ -80,6 +83,14 @@ async def _public_url(hass: HomeAssistant, entry: UteamupConfigEntry, webhook_id
         return None
 
 
+def _cloud_connecting(hass: HomeAssistant) -> bool:
+    if "cloud" not in hass.config.components:
+        return False
+    from homeassistant.components import cloud  # noqa: PLC0415 - only when Home Assistant Cloud is loaded
+
+    return cloud.async_active_subscription(hass) and not cloud.async_is_connected(hass)
+
+
 async def async_setup_webhook(hass: HomeAssistant, entry: UteamupConfigEntry) -> None:
     """Register the receiver and make sure UteamUP has a matching subscription."""
     data = dict(entry.data)
@@ -87,15 +98,29 @@ async def async_setup_webhook(hass: HomeAssistant, entry: UteamupConfigEntry) ->
     data.setdefault(CONF_WEBHOOK_SECRET, secrets.token_hex(32))
     if data != entry.data:
         hass.config_entries.async_update_entry(entry, data=data)
-    webhook_id = data[CONF_WEBHOOK_ID]
 
     webhook.async_register(
-        hass, DOMAIN, f"UteamUP {entry.title}", webhook_id, _handler(entry), allowed_methods=["POST"]
+        hass, DOMAIN, f"UteamUP {entry.title}", data[CONF_WEBHOOK_ID], _handler(entry), allowed_methods=["POST"]
     )
 
-    url = await _public_url(hass, entry, webhook_id)
+    if "cloud" in hass.config.components:
+        from homeassistant.components import cloud  # noqa: PLC0415 - only when Home Assistant Cloud is loaded
+
+        # Cloud connects after startup; sync again once it does instead of reporting no URL.
+        async def _cloud_state_changed(state: cloud.CloudConnectionState) -> None:
+            if state is cloud.CloudConnectionState.CLOUD_CONNECTED:
+                await _async_sync_subscription(hass, entry)
+
+        entry.async_on_unload(cloud.async_listen_connection_change(hass, _cloud_state_changed))
+
+    await _async_sync_subscription(hass, entry)
+
+
+async def _async_sync_subscription(hass: HomeAssistant, entry: UteamupConfigEntry) -> None:
+    url = await _public_url(hass, entry, entry.data[CONF_WEBHOOK_ID])
     if url is None:
-        _issue(hass, entry, "webhook_url_unavailable")
+        if not _cloud_connecting(hass):
+            _issue(hass, entry, "webhook_url_unavailable")
         return
 
     client = entry.runtime_data.client
@@ -108,7 +133,7 @@ async def async_setup_webhook(hass: HomeAssistant, entry: UteamupConfigEntry) ->
         if stored:
             await _delete_subscription(client, stored)
         created = await client.async_create_webhook_subscription(
-            f"Home Assistant ({hass.config.location_name})", url, data[CONF_WEBHOOK_SECRET], list(WEBHOOK_EVENTS)
+            f"Home Assistant ({hass.config.location_name})", url, entry.data[CONF_WEBHOOK_SECRET], list(WEBHOOK_EVENTS)
         )
     except UteamupForbiddenError:
         _issue(hass, entry, "webhooks_not_allowed")

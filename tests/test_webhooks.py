@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import sys
+from enum import Enum
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +19,7 @@ from pytest_homeassistant_custom_component.common import async_capture_events
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
 
 from custom_components.uteamup.const import (
+    CONF_CLOUDHOOK_URL,
     CONF_ENABLE_WEBHOOKS,
     CONF_WEBHOOK_ID,
     CONF_WEBHOOK_SECRET,
@@ -141,3 +145,94 @@ async def test_a_plan_without_webhooks_raises_a_repair_issue(
     await setup_entry(hass, config_entry)
 
     assert ir.async_get(hass).async_get_issue(DOMAIN, f"webhooks_not_allowed_{config_entry.entry_id}")
+
+
+class _CloudState(Enum):
+    CLOUD_CONNECTED = "cloud_connected"
+    CLOUD_DISCONNECTED = "cloud_disconnected"
+
+
+@pytest.fixture
+def cloud(hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """A Home Assistant Cloud stand-in: subscribed, but still connecting, as just after a restart."""
+    import homeassistant.components as components
+
+    listeners = []
+
+    async def create_cloudhook(_hass, webhook_id):
+        fake.created.append(webhook_id)
+        return f"https://hooks.nabu.casa/{webhook_id}"
+
+    def listen(_hass, target):
+        listeners.append(target)
+        return lambda: listeners.remove(target)
+
+    async def connect():
+        fake.connected = True
+        for target in list(listeners):
+            await target(_CloudState.CLOUD_CONNECTED)
+
+    fake = SimpleNamespace(
+        connected=False,
+        created=[],
+        connect=connect,
+        CloudConnectionState=_CloudState,
+        async_active_subscription=lambda _hass: True,
+        async_is_connected=lambda _hass: fake.connected,
+        async_create_cloudhook=create_cloudhook,
+        async_listen_connection_change=listen,
+    )
+    monkeypatch.setitem(sys.modules, "homeassistant.components.cloud", fake)
+    monkeypatch.setattr(components, "cloud", fake, raising=False)
+    hass.config.components.add("cloud")
+    return fake
+
+
+def _subscription_creates(aioclient_mock: AiohttpClientMocker) -> list:
+    return [call for call in aioclient_mock.mock_calls if call[0] == "POST" and call[1].path == "/api/webhooks/subscriptions"]
+
+
+async def _setup_without_external_url(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, config_entry, **data: str
+) -> None:
+    await async_setup_component(hass, "webhook", {})
+    config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        config_entry, data={**config_entry.data, **data}, options={CONF_ENABLE_WEBHOOKS: True}
+    )
+    mock_login(aioclient_mock)
+    mock_reads(aioclient_mock)
+    aioclient_mock.get(f"{BASE}/api/webhooks/subscriptions", json=[])
+    aioclient_mock.post(f"{BASE}/api/webhooks/subscriptions", status=201, json={"guid": SUBSCRIPTION})
+    await setup_entry(hass, config_entry)
+
+
+async def test_a_stored_cloudhook_is_used_while_cloud_is_still_connecting(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, config_entry, cloud
+) -> None:
+    await _setup_without_external_url(
+        hass,
+        aioclient_mock,
+        config_entry,
+        **{CONF_WEBHOOK_ID: "hook", CONF_CLOUDHOOK_URL: "https://hooks.nabu.casa/hook"},
+    )
+
+    assert not ir.async_get(hass).async_get_issue(DOMAIN, f"webhook_url_unavailable_{config_entry.entry_id}")
+    assert [call[2]["url"] for call in _subscription_creates(aioclient_mock)] == ["https://hooks.nabu.casa/hook"]
+    assert cloud.created == []
+
+
+async def test_a_new_cloudhook_waits_for_cloud_to_connect(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, config_entry, cloud
+) -> None:
+    await _setup_without_external_url(hass, aioclient_mock, config_entry)
+    assert not ir.async_get(hass).async_get_issue(DOMAIN, f"webhook_url_unavailable_{config_entry.entry_id}")
+    assert _subscription_creates(aioclient_mock) == []
+
+    await cloud.connect()
+
+    webhook_id = config_entry.data[CONF_WEBHOOK_ID]
+    assert cloud.created == [webhook_id]
+    assert config_entry.data[CONF_CLOUDHOOK_URL] == f"https://hooks.nabu.casa/{webhook_id}"
+    assert [call[2]["url"] for call in _subscription_creates(aioclient_mock)] == [f"https://hooks.nabu.casa/{webhook_id}"]
+    assert config_entry.data[CONF_WEBHOOK_SUBSCRIPTION_GUID] == SUBSCRIPTION
