@@ -30,6 +30,7 @@ def ingestion_endpoint(value: Any) -> str:
     parsed = urlsplit(address)
     if (
         parsed.scheme != "https"
+        or any(character.isspace() for character in address)
         or not parsed.hostname
         or parsed.username
         or parsed.password
@@ -38,6 +39,8 @@ def ingestion_endpoint(value: Any) -> str:
         or parsed.fragment
     ):
         raise ValueError("environment_unavailable")
+    # Accessing port validates malformed/out-of-range values without opening a connection.
+    _ = parsed.port
     return address
 
 
@@ -67,6 +70,24 @@ def normalize_mac(value: Any) -> str:
     return result
 
 
+def device_has_mac(device: dr.DeviceEntry | None, expected_mac: str) -> bool:
+    if device is None:
+        return False
+    for kind, address in device.connections:
+        if kind == dr.CONNECTION_NETWORK_MAC:
+            try:
+                if normalize_mac(address) == expected_mac:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+def valid_device_key(value: str) -> bool:
+    """Device keys are printable ASCII tokens, never arbitrary header content."""
+    return 0 < len(value) <= 512 and all(32 < ord(character) < 127 for character in value)
+
+
 @dataclass(frozen=True)
 class TelemetryMapping:
     """All identities are stable registry IDs or public UteamUP GUIDs."""
@@ -90,6 +111,7 @@ class TelemetryMapping:
         identity = asdict(self)
         identity.pop(CONF_DEVICE_KEY)
         identity.pop("name")
+        identity.pop("estimate_profile")
         return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
     @property
@@ -114,6 +136,8 @@ class TelemetrySettings:
         mappings = tuple(TelemetryMapping(**item) for item in data["mappings"])
         if not mappings or len({item.device_guid for item in mappings}) != len(mappings):
             raise ValueError("device_mismatch")
+        if len({item.ha_device_id for item in mappings}) != len(mappings):
+            raise ValueError("device_mismatch")
         for mapping in mappings:
             for identifier in (
                 mapping.device_guid, mapping.asset_guid,
@@ -121,7 +145,9 @@ class TelemetrySettings:
             ):
                 public_guid(identifier)
             normalize_mac(mapping.mac_address)
-            if not mapping.device_key.strip() or not mapping.estimate_profile.strip():
+            for registry_id in (mapping.ha_device_id, mapping.source_registry_id, mapping.power_registry_id, mapping.energy_registry_id):
+                UUID(registry_id)
+            if not valid_device_key(mapping.device_key) or not mapping.estimate_profile.strip():
                 raise ValueError("invalid_mapping")
         return cls(
             ingestion_endpoint(data["endpoint"]), tenant,
@@ -163,6 +189,36 @@ def source_unit(entity: er.RegistryEntry, state: State | None) -> str | None:
     return (state.attributes.get(ATTR_UNIT_OF_MEASUREMENT) if state else None) or entity.unit_of_measurement
 
 
+def compatible_meter(definition: dict[str, Any], unit: str) -> bool:
+    return (
+        definition.get("isMeter") is True and definition.get("unit") == unit
+        and definition.get("isActive") is True and definition.get("allowIoTUpdates") is True
+        and definition.get("dataType") in {2, 3, "integer", "float", "Integer", "Float"}
+    )
+
+
+def mapping_source_choices(hass: HomeAssistant, device: dict[str, Any]) -> dict[str, list[str]]:
+    """Keep unrelated household lights and sensors out of each bulb's selectors."""
+    registry = er.async_get(hass)
+    devices = dr.async_get(hass)
+    mac = normalize_mac(device.get("macAddress"))
+    lights = [
+        item for item in registry.entities.values() if item.domain == "light" and not item.disabled
+        and item.device_id and device_has_mac(devices.async_get(item.device_id), mac)
+    ]
+    choices = {"source_entity": [item.entity_id for item in lights], "power_entity": [], "energy_entity": []}
+    for entity in registry.entities.values():
+        if entity.domain != "sensor" or entity.disabled:
+            continue
+        unit = source_unit(entity, hass.states.get(entity.entity_id))
+        if unit not in {"W", "kWh"} or not any(
+            source_belongs_to_device(hass, entity.entity_id, light.device_id, light.id) for light in lights
+        ):
+            continue
+        choices["power_entity" if unit == "W" else "energy_entity"].append(entity.entity_id)
+    return choices
+
+
 def build_mapping(
     hass: HomeAssistant, device: dict[str, Any], attributes: list[dict[str, Any]],
     inputs: dict[str, Any], previous: TelemetryMapping | None = None,
@@ -176,10 +232,7 @@ def build_mapping(
         raise ValueError("source_missing")
     physical = dr.async_get(hass).async_get(source.device_id)
     mac = normalize_mac(device.get("macAddress"))
-    if physical is None or not any(
-        kind == dr.CONNECTION_NETWORK_MAC and normalize_mac(address) == mac
-        for kind, address in physical.connections
-    ):
+    if not device_has_mac(physical, mac):
         raise ValueError("device_mismatch")
     for entity, unit in ((power, "W"), (energy, "kWh")):
         if entity is None or entity.domain != "sensor" or source_unit(entity, hass.states.get(entity.entity_id)) != unit:
@@ -189,11 +242,11 @@ def build_mapping(
     definitions = {item["attributeDefinitionGuid"]: item for group in attributes for item in group.get("definitions", [])}
     for field_name, unit in (("power_attribute_guid", "W"), ("energy_attribute_guid", "kWh")):
         definition = definitions.get(inputs[field_name]) or {}
-        if not definition.get("isMeter") or definition.get("unit") != unit:
+        if not compatible_meter(definition, unit):
             raise ValueError("attribute_mismatch")
     profile = str(inputs["estimate_profile"]).strip()
     key = str(inputs.get(CONF_DEVICE_KEY, "")).strip() or (previous.device_key if previous else "")
-    if not key or len(key) > 512 or len(profile) > 100 or not profile:
+    if not valid_device_key(key) or len(profile) > 100 or not profile:
         raise ValueError("invalid_mapping")
     return TelemetryMapping(
         public_guid(device["externalGuid"]), public_guid(device["assetGuid"]), str(device["name"]),

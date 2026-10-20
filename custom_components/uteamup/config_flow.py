@@ -29,8 +29,10 @@ from homeassistant.helpers.selector import (
 from . import create_client
 from .api import (
     UteamupAuthError,
+    UteamupClient,
     UteamupConnectionError,
     UteamupError,
+    UteamupForbiddenError,
     UteamupMcpKeyError,
     UteamupPlanError,
     UteamupRateLimitError,
@@ -51,7 +53,7 @@ from .const import (
 )
 from .coordinator import UteamupConfigEntry
 from .services import valid_guid
-from .telemetry_config import TelemetryMapping, build_mapping, environment_settings
+from .telemetry_config import TelemetryMapping, build_mapping, compatible_meter, environment_settings, mapping_source_choices
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -160,7 +162,7 @@ class UteamupOptionsFlow(OptionsFlow):
         self._selected: list[str] = []
         self._mappings: list[TelemetryMapping] = []
         self._attributes: list[dict[str, Any]] | None = None
-        self._client = None
+        self._client: UteamupClient | None = None
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -208,6 +210,8 @@ class UteamupOptionsFlow(OptionsFlow):
                     errors["base"] = "no_devices"
             except UteamupAuthError:
                 errors["base"] = "invalid_auth"
+            except UteamupForbiddenError:
+                errors["base"] = "telemetry_not_allowed"
             except UteamupError:
                 errors["base"] = "cannot_connect"
             except (KeyError, ValueError, TypeError):
@@ -246,13 +250,16 @@ class UteamupOptionsFlow(OptionsFlow):
         errors: dict[str, str] = {}
         if self._attributes is None:
             try:
+                assert self._client is not None
                 self._attributes = await self._client.async_get_effective_attributes(device["assetGuid"])
+            except UteamupForbiddenError:
+                errors["base"] = "telemetry_not_allowed"
             except UteamupError:
                 errors["base"] = "cannot_connect"
         if user_input is not None and not errors:
             try:
                 mapping = build_mapping(self.hass, device, self._attributes or [], user_input, previous)
-                if any(item.source_registry_id == mapping.source_registry_id for item in self._mappings):
+                if any(item.ha_device_id == mapping.ha_device_id for item in self._mappings):
                     raise ValueError("device_mismatch")
             except (ValueError, KeyError, TypeError) as err:
                 errors["base"] = str(err) if str(err) in {
@@ -281,21 +288,30 @@ class UteamupOptionsFlow(OptionsFlow):
             })
         # A rejected form preserves selections, but never echoes the credential as a default.
         defaults.update({key: value for key, value in (user_input or {}).items() if key != CONF_DEVICE_KEY})
+        try:
+            choices = mapping_source_choices(self.hass, device)
+        except ValueError:
+            errors["base"] = "device_mismatch"
+            choices = {name: [] for name in ("source_entity", "power_entity", "energy_entity")}
         fields: dict[Any, Any] = {}
         for name, domain in (("source_entity", "light"), ("power_entity", "sensor"), ("energy_entity", "sensor")):
+            if name not in defaults and len(choices[name]) == 1:
+                defaults[name] = choices[name][0]
             fields[vol.Required(name, description={"suggested_value": defaults.get(name)})] = EntitySelector(
-                EntitySelectorConfig(domain=domain)
+                EntitySelectorConfig(domain=domain, include_entities=choices[name])
             )
         for name, unit in (("power_attribute_guid", "W"), ("energy_attribute_guid", "kWh")):
             choices = {
                 item["attributeDefinitionGuid"]: item for group in self._attributes or []
-                for item in group.get("definitions", []) if item.get("isMeter") and item.get("unit") == unit
+                for item in group.get("definitions", []) if compatible_meter(item, unit)
             }
             fields[vol.Required(name, description={"suggested_value": defaults.get(name)})] = SelectSelector(
                 SelectSelectorConfig(options=[
                     {"value": guid, "label": f"{item['name']} ({unit})"} for guid, item in choices.items()
                 ], mode=SelectSelectorMode.DROPDOWN)
             )
+            if not choices:
+                errors.setdefault("base", "no_telemetry_meters")
         fields[vol.Required("estimate_profile", default=defaults.get("estimate_profile", ""))] = cv.string
         fields[vol.Optional(CONF_DEVICE_KEY)] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
         return self.async_show_form(

@@ -18,16 +18,20 @@ from .conftest import ASSET_GUID, ATTRIBUTE_GUID, TENANT
 DEVICE_GUID = "55555555-5555-4555-8555-555555555555"
 ENERGY_GUID = "66666666-6666-4666-8666-666666666666"
 ENVIRONMENT_GUID = "77777777-7777-4777-8777-777777777777"
+ASSET_TYPE_GUID = "88888888-8888-4888-8888-888888888888"
 ENDPOINT = "https://ingestion.example.test"
 DEVICE_KEY = "device-only-secret"
 DEVICE = {
     "externalGuid": DEVICE_GUID, "name": "Entrance", "assetGuid": ASSET_GUID,
     "macAddress": "AA:BB:CC:DD:EE:FF", "isActive": True,
 }
-ATTRIBUTES = [{"definitions": [
-    {"attributeDefinitionGuid": ATTRIBUTE_GUID, "name": "Estimated power", "unit": "W", "isMeter": True},
-    {"attributeDefinitionGuid": ENERGY_GUID, "name": "Cumulative estimated energy", "unit": "kWh", "isMeter": True},
+ATTRIBUTES = [{"assetTypeGuid": ASSET_TYPE_GUID, "definitions": [
+    {"attributeDefinitionGuid": ATTRIBUTE_GUID, "name": "Estimated power", "unit": "W", "isMeter": True, "isActive": True, "allowIoTUpdates": True, "dataType": 3},
+    {"attributeDefinitionGuid": ENERGY_GUID, "name": "Cumulative estimated energy", "unit": "kWh", "isMeter": True, "isActive": True, "allowIoTUpdates": True, "dataType": 3},
 ]}]
+ASSET_TYPE = {"isActive": True, "attributeDefinitions": [
+    {**item, "externalGuid": item["attributeDefinitionGuid"]} for item in ATTRIBUTES[0]["definitions"]
+]}
 
 
 def environment_response():
@@ -101,6 +105,27 @@ async def test_existing_masked_key_is_preserved_when_left_blank(hass, config_ent
     updated = build_mapping(hass, DEVICE, ATTRIBUTES, {**inputs, "device_key": ""}, previous)
     assert updated.device_key == DEVICE_KEY
     assert updated.fingerprint == previous.fingerprint
+
+
+@pytest.mark.parametrize("flag", ["isActive", "allowIoTUpdates"])
+async def test_disabled_or_non_iot_meter_is_rejected(hass, config_entry, flag):
+    *_, inputs = register_sources(hass, config_entry)
+    definitions = [{"definitions": [{**item, flag: False} for item in ATTRIBUTES[0]["definitions"]]}]
+    with pytest.raises(ValueError, match="attribute_mismatch"):
+        build_mapping(hass, DEVICE, definitions, inputs)
+
+
+async def test_device_key_cannot_inject_http_headers(hass, config_entry):
+    *_, inputs = register_sources(hass, config_entry)
+    with pytest.raises(ValueError, match="invalid_mapping"):
+        build_mapping(hass, DEVICE, ATTRIBUTES, {**inputs, "device_key": "key\r\nAnother: value"})
+
+
+async def test_string_meter_is_not_a_numeric_telemetry_target(hass, config_entry):
+    *_, inputs = register_sources(hass, config_entry)
+    definitions = [{"definitions": [{**item, "dataType": 1} for item in ATTRIBUTES[0]["definitions"]]}]
+    with pytest.raises(ValueError, match="attribute_mismatch"):
+        build_mapping(hass, DEVICE, definitions, inputs)
 
 
 @pytest.mark.parametrize("address", [

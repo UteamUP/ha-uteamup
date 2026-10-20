@@ -94,6 +94,7 @@ class UteamupClient:
         self._tenant_guid = tenant_guid
         self._token: str | None = None
         self._expires_at = 0.0
+        self._telemetry_attribute_types: dict[str, dict[str, Any]] = {}
 
     @property
     def tenant_guid(self) -> str | None:
@@ -207,10 +208,32 @@ class UteamupClient:
         raise UteamupApiError("Too many devices to configure telemetry in one connection")
 
     async def async_get_effective_attributes(self, asset_guid: str) -> list[dict[str, Any]]:
-        """Read public attribute GUIDs and units for an existing asset."""
-        return await self._request(
+        """Enrich effective public GUIDs with authoritative active/IoT meter flags."""
+        groups = await self._request(
             "GET", f"/api/asset/by-guid/{asset_guid}/effective-attribute-definitions"
         )
+        result = []
+        for group in groups:
+            type_guid = group["assetTypeGuid"]
+            if type_guid not in self._telemetry_attribute_types:
+                self._telemetry_attribute_types[type_guid] = await self._request(
+                    "GET", f"/api/asset-type/{type_guid}/with-inherited-attributes"
+                )
+            asset_type = self._telemetry_attribute_types[type_guid]
+            definitions = {item["externalGuid"]: item for item in asset_type.get("attributeDefinitions", [])}
+            enriched = []
+            for definition in group.get("definitions", []):
+                full = definitions.get(definition["attributeDefinitionGuid"], {})
+                enriched.append({
+                    **definition,
+                    "isActive": asset_type.get("isActive") is True and full.get("isActive") is True,
+                    "allowIoTUpdates": full.get("allowIoTUpdates") is True,
+                    "isMeter": full.get("isMeter") is True,
+                    "unit": full.get("unit"),
+                    "dataType": full.get("dataType"),
+                })
+            result.append({**group, "definitions": enriched})
+        return result
 
     async def async_get_open_work_orders(self) -> dict[str, Any]:
         return await self._request(
