@@ -191,6 +191,27 @@ class UteamupClient:
             "GET", "/api/iot/alerts", params={"unacknowledgedOnly": "true", "page": 1, "pageSize": 100}
         )
 
+    async def async_get_iot_environment(self) -> dict[str, Any]:
+        """Read the tenant's dedicated ingestion endpoint, without provisioning it."""
+        return await self._request("GET", "/api/iot/environment")
+
+    async def async_get_iot_devices(self) -> list[dict[str, Any]]:
+        """Read existing devices visible to this tenant API key."""
+        items: list[dict[str, Any]] = []
+        for page in range(1, 101):
+            result = await self._request("GET", "/api/iot/devices", params={"page": page, "pageSize": 100})
+            batch = result["items"]
+            items.extend(batch)
+            if not batch or len(items) >= result["totalItems"]:
+                return items
+        raise UteamupApiError("Too many devices to configure telemetry in one connection")
+
+    async def async_get_effective_attributes(self, asset_guid: str) -> list[dict[str, Any]]:
+        """Read public attribute GUIDs and units for an existing asset."""
+        return await self._request(
+            "GET", f"/api/asset/by-guid/{asset_guid}/effective-attribute-definitions"
+        )
+
     async def async_get_open_work_orders(self) -> dict[str, Any]:
         return await self._request(
             "GET", "/api/workorder", params={"openOnly": "true", "page": 1, "pageSize": 100}
