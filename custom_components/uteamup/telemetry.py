@@ -1,0 +1,269 @@
+"""Optional dedicated IoT export; source availability is independent of delivery health."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import sqlite3
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
+
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.util import dt as dt_util
+
+from .const import DOMAIN, TELEMETRY_SAMPLE_SECONDS
+from .telemetry_config import TelemetryMapping, TelemetrySettings, device_has_mac, source_belongs_to_device, source_unit
+from .telemetry_queue import QueuedEnvelope, QueueStats, TelemetryQueue
+from .telemetry_transport import TelemetryTransport, retry_delay
+
+if TYPE_CHECKING:
+    from .coordinator import UteamupConfigEntry
+
+_LOGGER = logging.getLogger(__name__)
+MAX_ESTIMATE_PARAMETER_WATTS = 1000
+
+
+def _estimate_parameters(attributes: Mapping[str, Any]) -> dict[str, float]:
+    """Retain adjustable assumptions without copying arbitrary (possibly secret) attributes."""
+    parameters = {}
+    for attribute, name in (
+        ("assumed_full_power_w", "assumedFullPowerW"),
+        ("assumed_standby_power_w", "assumedStandbyPowerW"),
+    ):
+        value = attributes.get(attribute)
+        if (
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            and 0 <= value <= MAX_ESTIMATE_PARAMETER_WATTS and math.isfinite(value)
+        ):
+            parameters[name] = value
+    return parameters
+
+
+class SourceUnavailable(ValueError):
+    """An observation cannot truthfully represent its configured physical bulb."""
+
+
+def sample_envelope(
+    hass: HomeAssistant, settings: TelemetrySettings, mapping: TelemetryMapping, now: datetime,
+) -> QueuedEnvelope:
+    """Observe current HA sources; never estimate, integrate unknown gaps or create a heartbeat."""
+    registry = er.async_get(hass)
+    source = registry.async_get(mapping.source_registry_id)
+    power = registry.async_get(mapping.power_registry_id)
+    energy = registry.async_get(mapping.energy_registry_id)
+    if any(item is None or item.disabled for item in (source, power, energy)):
+        raise SourceUnavailable("source_missing")
+    if source.device_id != mapping.ha_device_id:
+        raise SourceUnavailable("device_mismatch")
+    physical = dr.async_get(hass).async_get(mapping.ha_device_id)
+    if not device_has_mac(physical, mapping.mac_address):
+        raise SourceUnavailable("device_mismatch")
+    states = [hass.states.get(item.entity_id) for item in (source, power, energy)]
+    if any(
+        state is None or state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN} or state.attributes.get("restored")
+        for state in states
+    ) or states[0].state not in {"on", "off"}:
+        raise SourceUnavailable("unavailable")
+    values: list[float] = []
+    for entity, state, unit in ((power, states[1], "W"), (energy, states[2], "kWh")):
+        if source_unit(entity, state) != unit:
+            raise SourceUnavailable("unit_mismatch")
+        if not source_belongs_to_device(hass, entity.entity_id, mapping.ha_device_id, source.id):
+            raise SourceUnavailable("device_mismatch")
+        profile = state.attributes.get("estimate_profile")
+        if profile and profile != mapping.estimate_profile:
+            raise SourceUnavailable("profile_mismatch")
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError) as err:
+            raise SourceUnavailable("invalid_value") from err
+        if not math.isfinite(value) or not 0 <= value <= 1e15:
+            raise SourceUnavailable("invalid_value")
+        values.append(value)
+    timestamp = now.isoformat()
+    event_id = str(uuid4())
+    payload = json.dumps({
+        "eventId": event_id, "tenantGuid": settings.tenant_guid, "deviceGuid": mapping.device_guid,
+        "observedAt": timestamp,
+        "metadata": {
+            "source": "homeassistant", "powerBasis": "estimated", "estimateProfile": mapping.estimate_profile,
+            "sourceRegistryId": source.id, "powerSourceRegistryId": power.id, "energySourceRegistryId": energy.id,
+            "powerStateUpdatedAt": states[1].last_updated.isoformat(),
+            "energyStateUpdatedAt": states[2].last_updated.isoformat(),
+            "estimateParameters": _estimate_parameters(states[1].attributes),
+        },
+        "points": [
+            {"pointId": str(uuid4()), "assetGuid": mapping.asset_guid, "attributeDefinitionGuid": attribute,
+             "value": value, "observedAt": timestamp, "unit": unit, "quality": "estimated"}
+            for attribute, value, unit in (
+                (mapping.power_attribute_guid, values[0], "W"), (mapping.energy_attribute_guid, values[1], "kWh"),
+            )
+        ],
+    }, separators=(",", ":"), allow_nan=False).encode()
+    return QueuedEnvelope(
+        event_id, settings.tenant_guid, mapping.device_guid, settings.environment_guid, mapping.fingerprint, payload,
+    )
+
+
+@dataclass
+class TelemetryHealth:
+    sender: str = "starting"
+    sources: dict[str, str] = field(default_factory=dict)
+    queue: QueueStats = field(default_factory=QueueStats)
+    last_success: datetime | None = None
+
+
+class UteamupTelemetry:
+    """Two cancellable tasks share a durable spool but never depend on CMMS polling."""
+
+    def __init__(self, hass: HomeAssistant, entry: UteamupConfigEntry, settings: TelemetrySettings) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.settings = settings
+        self.health = TelemetryHealth()
+        self.queue = TelemetryQueue(hass, hass.config.path(".storage", f"uteamup_telemetry_{entry.entry_id}.db"))
+        self.transport = TelemetryTransport(async_get_clientsession(hass, verify_ssl=True), settings.endpoint)
+        self.signal = f"{DOMAIN}_{entry.entry_id}_telemetry_health"
+        self._mappings = {item.device_guid: item for item in settings.mappings}
+        self._tasks: list[asyncio.Task] = []
+        self._stopped = False
+        self._queue_full = False
+        self._storage_error = False
+        self._issues: set[str] = set()
+
+    async def async_start(self) -> None:
+        try:
+            await self.queue.async_configure(
+                {item.device_guid: item.credential_hash for item in self.settings.mappings}, self.settings.retry_nonce,
+            )
+            await self._async_update_health()
+        except (sqlite3.Error, OSError):
+            self._mark_storage_error()
+        self._tasks = [
+            self.entry.async_create_background_task(self.hass, self._sample_loop(), "UteamUP telemetry capture"),
+            self.entry.async_create_background_task(self.hass, self._send_loop(), "UteamUP telemetry delivery"),
+        ]
+
+    async def async_stop(self) -> None:
+        self._stopped = True
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
+        self.health.sender = "disabled"
+        for issue in tuple(self._issues):
+            self._set_issue(issue, False)
+        self._notify()
+
+    def diagnostics(self) -> dict[str, Any]:
+        """No payloads, credential hashes or source state attributes leave this boundary."""
+        return {
+            "sender": self.health.sender, "sources": dict(self.health.sources),
+            "queue": asdict(self.health.queue), "last_success": self.health.last_success,
+        }
+
+    async def async_sample_once(self) -> None:
+        blocked = await self.queue.async_blocked_devices()
+        overflow = False
+        for mapping in self.settings.mappings:
+            try:
+                envelope = sample_envelope(self.hass, self.settings, mapping, dt_util.utcnow())
+            except SourceUnavailable as err:
+                self.health.sources[mapping.device_guid] = str(err)
+                continue
+            self.health.sources[mapping.device_guid] = "available"
+            if mapping.device_guid not in blocked:
+                overflow = not await self.queue.async_enqueue(envelope) or overflow
+        self._queue_full = overflow
+        await self._async_update_health()
+
+    async def async_send_once(self) -> bool:
+        """Return whether a due event was considered; a retry never mutates its payload."""
+        now = dt_util.utcnow()
+        envelope = await self.queue.async_next(now.timestamp())
+        if envelope is None:
+            return False
+        mapping = self._mappings.get(envelope.device_guid)
+        if (
+            mapping is None or envelope.tenant_guid != self.settings.tenant_guid
+            or envelope.environment_guid != self.settings.environment_guid
+            or envelope.mapping_fingerprint != mapping.fingerprint
+        ):
+            await self.queue.async_block(envelope, "mapping_changed")
+        else:
+            result = await self.transport.async_send(envelope, mapping.device_key)
+            if result.outcome == "accepted":
+                await self.queue.async_acknowledge(envelope.event_id)
+                self.health.last_success = dt_util.utcnow()
+            elif result.outcome == "retrying":
+                await self.queue.async_defer(
+                    envelope, dt_util.utcnow().timestamp() + retry_delay(envelope.attempts, result.retry_after),
+                )
+            else:
+                await self.queue.async_block(envelope, result.outcome)
+        await self._async_update_health()
+        return True
+
+    async def _sample_loop(self) -> None:
+        while not self._stopped:
+            try:
+                await self.async_sample_once()
+            except (sqlite3.Error, OSError):
+                self._mark_storage_error()
+            await asyncio.sleep(TELEMETRY_SAMPLE_SECONDS)
+
+    async def _send_loop(self) -> None:
+        while not self._stopped:
+            sent = False
+            try:
+                sent = await self.async_send_once()
+                if not sent:
+                    await self._async_update_health()
+            except (sqlite3.Error, OSError):
+                self._mark_storage_error()
+            await asyncio.sleep(0 if sent else 5)
+
+    async def _async_update_health(self) -> None:
+        self.health.queue = await self.queue.async_stats()
+        self._storage_error = False
+        queue = self.health.queue
+        self.health.sender = (
+            "blocked" if queue.blocked_devices else "queue_full" if self._queue_full
+            else "retrying" if queue.retrying_devices else "running"
+        )
+        self._set_issue("queue_full", self._queue_full)
+        self._set_issue("blocked", bool(queue.blocked_devices))
+        self._set_issue("storage_error", False)
+        self._notify()
+
+    def _mark_storage_error(self) -> None:
+        if not self._storage_error:
+            _LOGGER.error("UteamUP telemetry storage is unavailable; no unpersisted readings will be sent")
+        self._storage_error = True
+        self.health.sender = "storage_error"
+        self._set_issue("storage_error", True)
+        self._notify()
+
+    def _set_issue(self, key: str, active: bool) -> None:
+        issue_id = f"{self.entry.entry_id}_telemetry_{key}"
+        if active and key not in self._issues:
+            ir.async_create_issue(
+                self.hass, DOMAIN, issue_id, is_fixable=False, severity=ir.IssueSeverity.WARNING,
+                translation_key=f"telemetry_{key}", translation_placeholders={"title": self.entry.title},
+            )
+            self._issues.add(key)
+        elif not active and key in self._issues:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            self._issues.discard(key)
+
+    def _notify(self) -> None:
+        async_dispatcher_send(self.hass, self.signal)

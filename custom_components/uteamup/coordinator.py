@@ -6,7 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_SCAN_INTERVAL
@@ -22,6 +22,9 @@ from .api import (
     UteamupNotFoundError,
 )
 from .const import CONF_ASSIGNEE_GUID, DEFAULT_SCAN_INTERVAL, DOMAIN
+
+if TYPE_CHECKING:
+    from .telemetry import UteamupTelemetry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +46,7 @@ class UteamupRuntimeData:
 
     client: UteamupClient
     coordinator: UteamupCoordinator
+    telemetry: UteamupTelemetry | None = None
 
 
 type UteamupConfigEntry = ConfigEntry[UteamupRuntimeData]
