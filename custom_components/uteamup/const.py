@@ -17,6 +17,13 @@ CONF_CLOUDHOOK_URL: Final = "cloudhook_url"
 
 CONF_ENABLE_WEBHOOKS: Final = "enable_webhooks"
 CONF_ASSIGNEE_GUID: Final = "assignee_guid"
+CONF_ENABLE_TELEMETRY: Final = "enable_telemetry"
+CONF_TELEMETRY: Final = "telemetry"
+CONF_DEVICE_KEY: Final = "device_key"
+
+TELEMETRY_SAMPLE_SECONDS: Final = 60
+TELEMETRY_QUEUE_MAX_COUNT: Final = 50_000
+TELEMETRY_QUEUE_MAX_BYTES: Final = 64 * 1024 * 1024
 
 DEFAULT_SCAN_INTERVAL: Final = 120
 MIN_SCAN_INTERVAL: Final = 30
