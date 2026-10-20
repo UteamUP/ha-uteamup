@@ -56,16 +56,61 @@
         "data": {
           "scan_interval": "Refresh interval (seconds)",
           "enable_webhooks": "Receive live events",
-          "assignee_guid": "Only list work orders assigned to (user GUID)"
+          "assignee_guid": "Only list work orders assigned to (user GUID)",
+          "enable_telemetry": "Send estimated energy to dedicated IoT"
         },
         "data_description": {
           "enable_webhooks": "Needs the Enterprise plan and a public Home Assistant URL, such as Home Assistant Cloud. Polling continues either way.",
-          "assignee_guid": "Leave empty to list every open work order."
+          "assignee_guid": "Leave empty to list every open work order.",
+          "enable_telemetry": "Optional. Review existing bulbs and their estimated W/cumulative-kWh sources next. Requires an already active, healthy dedicated tenant endpoint. Turning this off stops delivery and keeps the local queue."
         }
+      },
+      "telemetry_devices": {
+        "title": "Choose existing IoT bulbs",
+        "description": "Select the existing UteamUP devices to configure. Each must already be linked to its asset and physical MAC address. Unchecked devices stop capturing; their queued readings remain retained for review. This does not provision infrastructure or purchase anything.",
+        "data": {
+          "devices": "Bulbs",
+          "retry_quarantined": "Retry retained quarantined readings"
+        },
+        "data_description": {
+          "retry_quarantined": "Use only after fixing a rejected key, endpoint or meter configuration. Retries preserve the original payload and UUIDs. A changed physical mapping must be restored before its older readings can be retried."
+        }
+      },
+      "telemetry_mapping": {
+        "title": "Review {device} ({position}/{count})",
+        "description": "Choose this bulb's physical light and its estimated W and cumulative-kWh entities. Only sources belonging to this physical bulb are shown. Choose a cumulative energy meter, rather than a monthly consumption field. Enter the version of the provisional estimate profile and this bulb's own ingestion key.",
+        "data": {
+          "source_entity": "Physical bulb",
+          "power_entity": "Estimated power source (W)",
+          "energy_entity": "Cumulative estimated energy source (kWh)",
+          "power_attribute_guid": "UteamUP estimated-power meter",
+          "energy_attribute_guid": "UteamUP cumulative-energy meter",
+          "estimate_profile": "Estimate profile and version",
+          "device_key": "Device ingestion key"
+        },
+        "data_description": {
+          "estimate_profile": "Use the same version shown by the HA estimate source, for example demo-linear-v1. Estimates remain approximate and adjustable; they are not electricity billing measurements.",
+          "device_key": "Paste the narrow ingestion key for this bulb. Leave blank to keep its previously saved key. Keys are never prefilled or included in diagnostics."
+        }
+      },
+      "telemetry_confirm": {
+        "title": "Enable estimated energy delivery",
+        "description": "Enable the reviewed mappings for {count} bulbs to {endpoint}. Samples are taken every 60 seconds and marked estimated. Unavailable bulbs produce no new readings or heartbeat. Already queued observations can replay later with their original timestamps. The bounded queue retains rejected data and reports delivery failures separately from bulb availability. Submit to enable, or close this dialog to keep the existing settings."
       }
     },
     "error": {
-      "invalid_guid": "Enter a user GUID, or leave the field empty."
+      "invalid_guid": "Enter a user GUID, or leave the field empty.",
+      "invalid_auth": "UteamUP rejected the company API key. Update its credentials and try again.",
+      "cannot_connect": "Could not load the company's IoT configuration. Check the connection and try again.",
+      "telemetry_not_allowed": "The company API key and its creator need IOT.Environment.Read, IOT.View, Asset.View and AssetType.View.",
+      "environment_unavailable": "Dedicated ingestion is not ready. An active entitlement also needs a healthy HTTPS endpoint. Finish its setup in UteamUP first.",
+      "no_devices": "Choose at least one active existing IoT device with an asset and physical MAC address.",
+      "no_telemetry_meters": "This asset needs active numeric W and cumulative-kWh meter attributes with Allow IoT updates enabled. Add them in UteamUP, then reopen Configure.",
+      "source_missing": "The physical light must be registered in Home Assistant and linked to its WiZ device.",
+      "device_mismatch": "The selected sources do not belong to this physical bulb. Check their MAC and source_device_id/source metadata.",
+      "unit_mismatch": "Select registered W and kWh sensor entities with the correct units.",
+      "attribute_mismatch": "Select active W and cumulative-kWh meter attributes belonging to this asset with Allow IoT updates enabled.",
+      "invalid_mapping": "Enter the estimate profile version and a valid ingestion key for this bulb."
     }
   },
   "entity": {
@@ -84,7 +129,23 @@
           "action_required": { "name": "Action required" }
         }
       },
-      "iot_alerts": { "name": "Unacknowledged IoT alerts", "unit_of_measurement": "alerts" }
+      "iot_alerts": { "name": "Unacknowledged IoT alerts", "unit_of_measurement": "alerts" },
+      "telemetry_sender": {
+        "name": "Dedicated IoT delivery",
+        "state": {
+          "starting": "Starting",
+          "running": "Running",
+          "retrying": "Retrying delivery",
+          "blocked": "Device delivery needs attention",
+          "queue_full": "Capture paused: queue full",
+          "storage_error": "Local storage needs attention",
+          "disabled": "Disabled"
+        }
+      },
+      "telemetry_queue": { "name": "Queued IoT observations", "unit_of_measurement": "observations" },
+      "telemetry_quarantined": { "name": "Quarantined IoT observations", "unit_of_measurement": "observations" },
+      "telemetry_sources_available": { "name": "Available IoT bulb sources", "unit_of_measurement": "bulbs" },
+      "telemetry_last_success": { "name": "Last acknowledged IoT delivery" }
     },
     "binary_sensor": {
       "stock_critical": { "name": "Critical stock" },
@@ -105,6 +166,18 @@
     "webhooks_not_allowed": {
       "title": "UteamUP did not allow live events",
       "description": "{title} could not register a webhook. Webhooks need the Enterprise plan, and the API key's role and its creator need Webhook.Manage. Until then, the entities update on the refresh interval."
+    },
+    "telemetry_queue_full": {
+      "title": "UteamUP IoT capture reached its local queue limit",
+      "description": "{title} retained already queued data. Some new observations could not be captured; the queue sensor's missed_samples counter records them. Restore delivery or review quarantined observations. Capture resumes when space is available. No older data is silently discarded."
+    },
+    "telemetry_blocked": {
+      "title": "A UteamUP IoT device needs delivery attention",
+      "description": "{title} retained rejected observations and stopped capturing for the affected device. Check the device key, endpoint and meter mapping. Save a rotated key, or choose Retry retained quarantined readings in the integration options after correcting the cause. Original observation bytes and UUIDs are preserved."
+    },
+    "telemetry_storage_error": {
+      "title": "UteamUP cannot access its IoT queue",
+      "description": "{title} will not send unpersisted readings. Check free disk space and permissions for the integration's .storage/uteamup_telemetry queue. Retain the database while investigating; restoring storage access allows delivery to recover."
     }
   },
   "exceptions": {

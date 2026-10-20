@@ -9,7 +9,7 @@ UteamUP meters from automations.
 This takes about ten minutes. You need two things:
 
 - A UteamUP company on the **Premium** or **Enterprise** plan, and permission to manage it.
-- Home Assistant, version **2025.2 or newer**, with **HACS** installed (from Home Assistant
+- Home Assistant, version **2025.11.3 or newer**, with **HACS** installed (from Home Assistant
   2026.11 the same store is built in as **Settings → Marketplace**).
 
 ### Step 1: Get a "key" from UteamUP
@@ -174,6 +174,96 @@ UteamUP as a manual reading, so keep the interval coarse.
 - **Refresh interval**: 30 to 3600 seconds.
 - **Receive live events**: on or off.
 - **Only list work orders assigned to**: a UteamUP user GUID, for a personal to-do list.
+- **Send estimated energy to dedicated IoT**: optional, reviewed per-bulb delivery described below.
+
+## Dedicated estimated energy (optional)
+
+This sender uses an existing dedicated UteamUP IoT environment. Enabling it does not purchase
+anything or create cloud resources. A complimentary demo must already have its free entitlement
+and a healthy dedicated endpoint in UteamUP; a grant alone does not establish ingestion readiness.
+The sender requires Home Assistant **2025.11.3 or newer**. Work orders, calendars and the manual
+meter action keep their existing behavior when the sender is disabled.
+
+Prepare each physical bulb before enabling delivery:
+
+1. Link an existing active UteamUP IoT device to its asset and the bulb's actual MAC address.
+2. Add active meter attributes for **estimated power (W)** and **cumulative estimated energy
+   (kWh)** to that asset's effective type. Enable **Allow IoT updates** for those attributes.
+   Do not use static rated power or a field describing monthly consumption for a cumulative counter.
+3. Configure HA power/profile sources and a persistent cumulative energy helper. Estimated sources
+   must expose `source_device_id` (the physical HA device UUID), `source_entity_registry_id`, or
+   `source_entity` identifying that same light. Native Integral helpers may refer to their validated
+   power source through `source`. Device UUID metadata survives entity renames.
+4. Keep provisional assumptions visible and adjustable in HA. Set `estimate_profile` to a versioned
+   name. When actual rated watts are unknown, label the profile provisional; never present it as a
+   physical measurement. Verify that the energy helper excludes unavailable periods and Pi downtime.
+5. Obtain a narrow, expiring ingestion key **for each represented bulb**. The ordinary company API
+   key discovers configuration; it is never sent to the ingestion endpoint. Its role and creator
+   need `IOT.Environment.Read`, `IOT.View`, `Asset.View` and `AssetType.View` for this setup.
+
+In **Settings → Devices & services → UteamUP → Configure**, enable **Send estimated energy to
+dedicated IoT**. Select the existing bulbs, then review one compact mapping per bulb: the physical
+light, estimated W source, cumulative kWh source, corresponding named meters, profile version and
+that bulb's masked ingestion key. Unique matching sources are preselected. Leave an existing key
+blank to retain it. The final confirmation shows the discovered HTTPS endpoint and device count.
+No traffic starts before that confirmation is saved.
+
+Every 60 seconds, the sender observes available sources and durably stores one v1 envelope with
+both readings and immutable event/point UUIDs. Readings carry `quality: estimated`, the power basis
+and profile version. Numeric `assumed_full_power_w` and `assumed_standby_power_w` attributes
+between 0 and 1,000 W are retained as estimate parameters with each observation; unrelated source
+attributes are never copied. It does not calculate electricity cost or duplicate HA's energy integration.
+Unavailable, unknown, restored, wrong-unit or cross-device sources produce no new reading or
+heartbeat. Previously captured observations can still replay with their original timestamps while
+a bulb is unavailable; replay does not mean that the physical bulb is currently online.
+
+Delivery verifies TLS, refuses redirects and uses the device's own `X-Device-Key`. Only a matching
+accepted/duplicate acknowledgement removes an envelope. Timeouts, server errors and throttling
+back off with jitter and honor `Retry-After`. Rejected keys, endpoints or payloads quarantine the
+affected event and stop new capture for that device; other devices continue.
+
+The **Dedicated IoT delivery**, **Queued IoT observations**, **Quarantined IoT observations**,
+**Available IoT bulb sources** and **Last acknowledged IoT delivery** diagnostic sensors separate
+source availability from transport health. Queue attributes include bytes, retrying/blocked device
+counts and `missed_samples`. Repairs explain storage, rejection and overflow conditions. Device
+keys are recursively redacted from integration diagnostics and never stored in queue payloads.
+HA stores the keys in its config entry like other integration credentials; protect its backups.
+
+The restart-safe SQLite spool is `.storage/uteamup_telemetry_<entry-id>.db`, bounded to **50,000
+envelopes and 64 MiB of payloads**. The physical database also contains indexes and transaction
+overhead. At capacity, existing data is retained and new captures stop until space is available;
+`missed_samples` records observations that were not captured. Quarantined events use the same
+quota. Back up the spool before investigating it; do not delete it to clear an unexplained failure.
+
+After fixing the cause, save a rotated per-device key to release authentication failures, or
+select **Retry retained quarantined readings** in Configure. Retries keep the original data and
+identities. Changing a physical mapping or target meter never rewrites older queued observations;
+restore the reviewed mapping before retrying those observations. Old readings remain subject to
+the dedicated environment's ingestion-retention policy.
+
+A previously validated endpoint and mappings remain usable after a Pi restart during a company
+API outage. CMMS entities stay unavailable and recover independently. This does not bypass an
+expired/revoked device key or the dedicated endpoint's server-side authorization.
+
+### Update, disable and recovery
+
+For a published release, open **HACS → UteamUP → Redownload**, select the reviewed version and
+restart Home Assistant. Keep the existing config entry; options, entity identities and queue
+survive an update. Back up HA before replacing the integration, and never edit `.storage` while HA
+is running.
+
+A reviewed release archive contains `custom_components/uteamup/` at its root. For manual
+installation, stop HA, replace that directory under `/config/custom_components/uteamup/` with the
+reviewed archive's directory, then start HA. Do not copy a second nested `uteamup` directory. The
+release must come from the reviewed committed revision, with its manifest version and checksum
+recorded; an unpublished local change is not a HACS update.
+
+To pause, clear **Send estimated energy to dedicated IoT** and save the first options screen.
+This requires no API connection, stops both background tasks, and retains mappings and queue.
+Re-enable through the reviewed setup flow to resume. For immediate server-side revocation, revoke
+the affected device ingestion keys in UteamUP; this does not erase meter history. Removing a bulb
+from the selection preserves its queued data for review. Removing the integration also leaves its
+spool for explicit backup/recovery; a new config entry does not automatically adopt that old spool.
 
 ## Development
 
