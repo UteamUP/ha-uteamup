@@ -260,6 +260,15 @@
         "timestamp": { "name": "Taken at", "description": "When the reading was taken. Defaults to now." },
         "notes": { "name": "Notes", "description": "Shown with the reading." }
       }
+    },
+    "append_journal_entry": {
+      "name": "Append journal entry",
+      "description": "Appends a new line to an existing journal (activity log) in UteamUP.",
+      "fields": {
+        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
+        "journal_guid": { "name": "Journal GUID", "description": "The journal to append to." },
+        "entry": { "name": "Entry", "description": "The log line to append." }
+      }
     }
   },
   "selector": {

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import base64
+import html
 import json
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import aiohttp
@@ -303,6 +304,35 @@ class UteamupClient:
         if notes:
             body["notes"] = notes
         return await self._request("POST", f"/api/assets/{asset_guid}/meter-readings", json_body=body)
+
+    async def async_get_journal(self, journal_guid: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/journal/by-guid/{journal_guid}")
+
+    async def async_append_journal_entry(self, journal_guid: str, entry: str) -> dict[str, Any]:
+        current = await self.async_get_journal(journal_guid)
+        existing_content = (current.get("content") or "").rstrip()
+        new_line = f"<p>{html.escape(entry)}</p>"
+        updated_content = f"{existing_content}\n{new_line}" if existing_content else new_line
+
+        form = aiohttp.FormData(default_to_multipart=True)
+        form.add_field("Title", str(current.get("title") or ""))
+        form.add_field("Content", updated_content)
+        form.add_field(
+            "JournalDate",
+            str(current.get("journalDate") or datetime.now(UTC).isoformat()),
+        )
+        form.add_field("Priority", str(current.get("priority") or 1))
+        form.add_field("IsTemplate", "true" if current.get("isTemplate") else "false")
+        form.add_field("IsArchived", "true" if current.get("isArchived") else "false")
+        if current.get("summary"):
+            form.add_field("Summary", str(current["summary"]))
+        if current.get("categoryGuid"):
+            form.add_field("CategoryGuid", str(current["categoryGuid"]))
+        if current.get("locationGuid"):
+            form.add_field("LocationGuid", str(current["locationGuid"]))
+        if current.get("locationFloorGuid"):
+            form.add_field("LocationFloorGuid", str(current["locationFloorGuid"]))
+        return await self._request("PUT", f"/api/journal/by-guid/{journal_guid}", form=form)
 
     async def async_list_webhook_subscriptions(self) -> list[dict[str, Any]]:
         return await self._request("GET", "/api/webhooks/subscriptions")

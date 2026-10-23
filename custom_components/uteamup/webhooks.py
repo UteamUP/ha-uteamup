@@ -176,7 +176,7 @@ def _handler(entry: UteamupConfigEntry):
     seen: deque[str] = deque(maxlen=SEEN_DELIVERIES)
 
     async def handle(hass: HomeAssistant, webhook_id: str, request: web.Request) -> web.Response:
-        body = await request.read()
+        body = await request.read() if hasattr(request, "read") else await request.content.read()
         if not signature_valid(entry.data[CONF_WEBHOOK_SECRET], body, request.headers.get(SIGNATURE_HEADER)):
             return web.Response(status=401)
         delivery = request.headers.get(DELIVERY_HEADER)

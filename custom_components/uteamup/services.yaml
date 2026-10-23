@@ -146,3 +146,19 @@ record_meter_reading:
     notes:
       selector:
         text:
+
+append_journal_entry:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: uteamup
+    journal_guid:
+      required: true
+      selector:
+        text:
+    entry:
+      required: true
+      selector:
+        text:
+          multiline: true

@@ -114,6 +114,48 @@ async def test_record_meter_reading(hass: HomeAssistant, aioclient_mock: Aiohttp
     }
 
 
+async def test_append_journal_entry_preserves_metadata_and_escapes_html(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, loaded
+) -> None:
+    journal = "88888888-8888-4888-8888-888888888888"
+    path = f"/api/journal/by-guid/{journal}"
+    aioclient_mock.get(
+        f"{BASE}{path}",
+        json={
+            "guid": journal,
+            "title": "Activity Log",
+            "content": "<p>Header</p>",
+            "journalDate": "2026-10-18T17:00:00Z",
+            "priority": 2,
+            "summary": "Room activity",
+            "categoryGuid": "2c1da394-f841-4f98-9933-31c13c3d2e2f",
+            "locationGuid": "71cfb161-1978-4c3e-aa7d-1f00b9be0790",
+            "isTemplate": False,
+            "isArchived": False,
+        },
+    )
+    aioclient_mock.put(f"{BASE}{path}", json={"guid": journal})
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "append_journal_entry",
+        {"journal_guid": journal, "entry": "2026-10-18 17:55 — Einhver fór inn í kompu <1>"},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert response == {"journal_guid": journal}
+    form = _last(aioclient_mock, "PUT", path)[2]
+    assert form.is_multipart
+    fields = {field[0]["name"]: field[2] for field in form._fields}
+    assert fields["Title"] == "Activity Log"
+    assert fields["Content"] == "<p>Header</p>\n<p>2026-10-18 17:55 — Einhver fór inn í kompu &lt;1&gt;</p>"
+    assert fields["Priority"] == "2"
+    assert fields["Summary"] == "Room activity"
+    assert fields["CategoryGuid"] == "2c1da394-f841-4f98-9933-31c13c3d2e2f"
+    assert fields["LocationGuid"] == "71cfb161-1978-4c3e-aa7d-1f00b9be0790"
+
+
 @pytest.mark.parametrize(
     ("service", "data"),
     [

@@ -82,6 +82,13 @@ SCHEMAS: dict[str, vol.Schema] = {
             vol.Optional("notes"): cv.string,
         }
     ),
+    "append_journal_entry": vol.Schema(
+        {
+            **_BASE,
+            vol.Required("journal_guid"): valid_guid,
+            vol.Required("entry"): vol.All(cv.string, vol.Length(min=1, max=2000)),
+        }
+    ),
 }
 
 
@@ -159,6 +166,11 @@ async def _record_meter_reading(client: UteamupClient, data: dict[str, Any]) -> 
     return {"reading_guid": created.get("externalGuid")}
 
 
+async def _append_journal_entry(client: UteamupClient, data: dict[str, Any]) -> dict[str, Any]:
+    updated = await client.async_append_journal_entry(data["journal_guid"], data["entry"])
+    return {"journal_guid": updated.get("guid")}
+
+
 HANDLERS: dict[str, Callable[[UteamupClient, dict[str, Any]], Awaitable[dict[str, Any] | None]]] = {
     "create_work_order": _create_work_order,
     "create_quick_report": _create_quick_report,
@@ -167,9 +179,16 @@ HANDLERS: dict[str, Callable[[UteamupClient, dict[str, Any]], Awaitable[dict[str
     "set_asset_state": _set_asset_state,
     "run_pm_schedule": _run_pm_schedule,
     "record_meter_reading": _record_meter_reading,
+    "append_journal_entry": _append_journal_entry,
 }
 
-RETURNS_DATA = {"create_work_order", "create_quick_report", "run_pm_schedule", "record_meter_reading"}
+RETURNS_DATA = {
+    "create_work_order",
+    "create_quick_report",
+    "run_pm_schedule",
+    "record_meter_reading",
+    "append_journal_entry",
+}
 
 
 def async_setup_services(hass: HomeAssistant) -> None:

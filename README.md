@@ -82,7 +82,7 @@ and Home Assistant Cloud or another public address for Home Assistant; see [Live
 | Binary sensors | Critical stock, IoT alert active |
 | Calendar | Work orders by start and due date |
 | To-do list | Open work orders. Checking one completes it; adding one creates a work order |
-| Actions | `uteamup.create_work_order`, `uteamup.create_quick_report`, `uteamup.set_work_order_status`, `uteamup.complete_work_order`, `uteamup.set_asset_state`, `uteamup.run_pm_schedule`, `uteamup.record_meter_reading` |
+| Actions | `uteamup.create_work_order`, `uteamup.create_quick_report`, `uteamup.set_work_order_status`, `uteamup.complete_work_order`, `uteamup.set_asset_state`, `uteamup.run_pm_schedule`, `uteamup.record_meter_reading`, `uteamup.append_journal_entry` |
 | Events | `uteamup_event`, fired for every webhook UteamUP delivers (`workorder.created`, `iot.alert.created`, …) |
 | Blueprint | Push a sensor to a UteamUP meter on a schedule |
 
@@ -106,6 +106,7 @@ API keys need the **Premium** or **Enterprise** plan. Live events need **Enterpr
    | Set asset state | `Asset.SetOperationalState` |
    | Run preventive maintenance | `WorkOrderTemplate.Update` and `WorkOrder.Create` |
    | Record meter readings | `MeterReading.Update` |
+   | Append journal entries | `Journal.View` and `Journal.Update` |
    | Live events | `Webhook.View` and `Webhook.Manage` |
 
 2. Create a tenant API key with that role. **Leave MCP access off**: MCP keys cannot sign in here.
