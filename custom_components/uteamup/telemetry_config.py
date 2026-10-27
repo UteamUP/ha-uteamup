@@ -15,6 +15,9 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .const import CONF_DEVICE_KEY, CONF_TENANT_GUID
 
+SOURCE_DOMAINS = ("light", "switch")
+POWER_BASES = ("estimated", "measured")
+
 
 def public_guid(value: Any) -> str:
     """Normalize a non-empty public identifier."""
@@ -104,6 +107,7 @@ class TelemetryMapping:
     energy_attribute_guid: str
     estimate_profile: str
     device_key: str = field(repr=False)
+    power_basis: str = "estimated"
 
     @property
     def fingerprint(self) -> str:
@@ -112,6 +116,9 @@ class TelemetryMapping:
         identity.pop(CONF_DEVICE_KEY)
         identity.pop("name")
         identity.pop("estimate_profile")
+        # Existing estimated mappings must keep accepting their durable queued data.
+        if self.power_basis == "estimated":
+            identity.pop("power_basis")
         return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
     @property
@@ -147,7 +154,10 @@ class TelemetrySettings:
             normalize_mac(mapping.mac_address)
             for registry_id in (mapping.ha_device_id, mapping.source_registry_id, mapping.power_registry_id, mapping.energy_registry_id):
                 UUID(registry_id)
-            if not valid_device_key(mapping.device_key) or not mapping.estimate_profile.strip():
+            if (
+                not valid_device_key(mapping.device_key) or mapping.power_basis not in POWER_BASES
+                or (mapping.power_basis == "estimated" and not mapping.estimate_profile.strip())
+            ):
                 raise ValueError("invalid_mapping")
         return cls(
             ingestion_endpoint(data["endpoint"]), tenant,
@@ -198,25 +208,46 @@ def compatible_meter(definition: dict[str, Any], unit: str) -> bool:
 
 
 def mapping_source_choices(hass: HomeAssistant, device: dict[str, Any]) -> dict[str, list[str]]:
-    """Keep unrelated household lights and sensors out of each bulb's selectors."""
+    """Offer the physical light or socket and only its own meter sources."""
     registry = er.async_get(hass)
     devices = dr.async_get(hass)
     mac = normalize_mac(device.get("macAddress"))
-    lights = [
-        item for item in registry.entities.values() if item.domain == "light" and not item.disabled
+    sources = [
+        item for item in registry.entities.values() if item.domain in SOURCE_DOMAINS and not item.disabled
         and item.device_id and device_has_mac(devices.async_get(item.device_id), mac)
     ]
-    choices = {"source_entity": [item.entity_id for item in lights], "power_entity": [], "energy_entity": []}
+    choices = {"source_entity": [item.entity_id for item in sources], "power_entity": [], "energy_entity": []}
     for entity in registry.entities.values():
         if entity.domain != "sensor" or entity.disabled:
             continue
         unit = source_unit(entity, hass.states.get(entity.entity_id))
         if unit not in {"W", "kWh"} or not any(
-            source_belongs_to_device(hass, entity.entity_id, light.device_id, light.id) for light in lights
+            source_belongs_to_device(hass, entity.entity_id, source.device_id, source.id) for source in sources
         ):
             continue
         choices["power_entity" if unit == "W" else "energy_entity"].append(entity.entity_id)
     return choices
+
+
+def measured_wiz_sources_match(
+    hass: HomeAssistant, source: er.RegistryEntry, meters: tuple[er.RegistryEntry, er.RegistryEntry],
+) -> bool:
+    """Measured socket power must come from WiZ, with energy derived from that same meter."""
+    power, energy = meters
+    if source.domain != "switch" or source.platform != "wiz":
+        return False
+    if power.platform != "wiz" or power.device_id != source.device_id:
+        return False
+    for entity in meters:
+        state = hass.states.get(entity.entity_id)
+        if state is None or state.attributes.get("estimate_profile") or state.attributes.get("power_basis") == "estimated":
+            return False
+    if energy.platform == "wiz" and energy.device_id == source.device_id:
+        return True
+    energy_state = hass.states.get(energy.entity_id)
+    return energy.platform == "integration" and energy_state.attributes.get("source") in {
+        power.entity_id, power.id,
+    }
 
 
 def build_mapping(
@@ -228,14 +259,14 @@ def build_mapping(
     source = registry.async_get(inputs["source_entity"])
     power = registry.async_get(inputs["power_entity"])
     energy = registry.async_get(inputs["energy_entity"])
-    if source is None or source.domain != "light" or not source.device_id or source.disabled:
+    if source is None or source.domain not in SOURCE_DOMAINS or not source.device_id or source.disabled:
         raise ValueError("source_missing")
     physical = dr.async_get(hass).async_get(source.device_id)
     mac = normalize_mac(device.get("macAddress"))
     if not device_has_mac(physical, mac):
         raise ValueError("device_mismatch")
     for entity, unit in ((power, "W"), (energy, "kWh")):
-        if entity is None or entity.domain != "sensor" or source_unit(entity, hass.states.get(entity.entity_id)) != unit:
+        if entity is None or entity.disabled or entity.domain != "sensor" or source_unit(entity, hass.states.get(entity.entity_id)) != unit:
             raise ValueError("unit_mismatch")
         if not source_belongs_to_device(hass, entity.entity_id, source.device_id, source.id):
             raise ValueError("device_mismatch")
@@ -244,12 +275,19 @@ def build_mapping(
         definition = definitions.get(inputs[field_name]) or {}
         if not compatible_meter(definition, unit):
             raise ValueError("attribute_mismatch")
-    profile = str(inputs["estimate_profile"]).strip()
+    basis = inputs.get("power_basis", "estimated")
+    profile = str(inputs.get("estimate_profile", "")).strip()
     key = str(inputs.get(CONF_DEVICE_KEY, "")).strip() or (previous.device_key if previous else "")
-    if not valid_device_key(key) or len(profile) > 100 or not profile:
+    if (
+        not valid_device_key(key) or basis not in POWER_BASES or len(profile) > 100
+        or (basis == "estimated" and not profile)
+    ):
         raise ValueError("invalid_mapping")
+    if basis == "measured" and not measured_wiz_sources_match(hass, source, (power, energy)):
+        raise ValueError("measured_source_required")
     return TelemetryMapping(
         public_guid(device["externalGuid"]), public_guid(device["assetGuid"]), str(device["name"]),
         source.device_id, mac, source.id, power.id, energy.id,
-        public_guid(inputs["power_attribute_guid"]), public_guid(inputs["energy_attribute_guid"]), profile, key,
+        public_guid(inputs["power_attribute_guid"]), public_guid(inputs["energy_attribute_guid"]),
+        profile if basis == "estimated" else "", key, basis,
     )

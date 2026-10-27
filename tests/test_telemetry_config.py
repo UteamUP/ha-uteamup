@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import hashlib
+import json
 
 import pytest
 
@@ -10,7 +12,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from custom_components.uteamup.const import CONF_TENANT_GUID
 from custom_components.uteamup.telemetry_config import (
-    TelemetrySettings, build_mapping, environment_settings, ingestion_endpoint,
+    TelemetrySettings, build_mapping, environment_settings, ingestion_endpoint, mapping_source_choices,
 )
 
 from .conftest import ASSET_GUID, ATTRIBUTE_GUID, TENANT
@@ -64,6 +66,62 @@ def register_sources(hass, config_entry):
         "estimate_profile": "demo-linear-v1", "device_key": DEVICE_KEY,
     }
     return light, power, energy, inputs
+
+
+def register_socket_sources(hass, config_entry):
+    """Native WiZ socket watts, with cumulative kWh from its Integral helper."""
+    light, old_power, _, inputs = register_sources(hass, config_entry)
+    registry = er.async_get(hass)
+    socket = registry.async_get_or_create("switch", "wiz", "socket_aabbccddeeff", device_id=light.device_id)
+    power = registry.async_get_or_create("sensor", "wiz", "socket_power", device_id=light.device_id, unit_of_measurement="W")
+    energy = registry.async_get(inputs["energy_entity"])
+    hass.states.async_set(socket.entity_id, "on")
+    hass.states.async_set(power.entity_id, "88", {"unit_of_measurement": "W", "device_class": "power"})
+    hass.states.async_set(energy.entity_id, "11.937", {"unit_of_measurement": "kWh", "source": power.entity_id})
+    registry.async_remove(light.entity_id)
+    registry.async_remove(old_power.entity_id)
+    inputs.update({"source_entity": socket.entity_id, "power_entity": power.entity_id, "power_basis": "measured", "estimate_profile": ""})
+    return socket, power, energy, inputs
+
+
+async def test_native_socket_mapping_offers_its_sources_and_needs_no_estimate_profile(hass, config_entry):
+    socket, power, energy, inputs = register_socket_sources(hass, config_entry)
+    unrelated = er.async_get(hass).async_get_or_create("switch", "wiz", "another_socket")
+    choices = mapping_source_choices(hass, DEVICE)
+    assert choices == {"source_entity": [socket.entity_id], "power_entity": [power.entity_id], "energy_entity": [energy.entity_id]}
+    assert unrelated.entity_id not in choices["source_entity"]
+    mapping = build_mapping(hass, DEVICE, ATTRIBUTES, inputs)
+    assert mapping.power_basis == "measured"
+    assert mapping.estimate_profile == ""
+    saved = {**environment_settings(environment_response(), TENANT), "mappings": [asdict(mapping)]}
+    assert TelemetrySettings.from_dict(saved, TENANT).mappings[0] == mapping
+
+
+async def test_estimated_helpers_cannot_be_labelled_as_measured(hass, config_entry):
+    *_, inputs = register_sources(hass, config_entry)
+    with pytest.raises(ValueError, match="measured_source_required"):
+        build_mapping(hass, DEVICE, ATTRIBUTES, {**inputs, "power_basis": "measured"})
+
+
+async def test_measured_energy_cannot_come_from_another_meter_on_the_device(hass, config_entry):
+    socket, _, energy, inputs = register_socket_sources(hass, config_entry)
+    other = er.async_get(hass).async_get_or_create("sensor", "wiz", "other_meter", device_id=socket.device_id)
+    hass.states.async_set(energy.entity_id, "11.937", {"unit_of_measurement": "kWh", "source": other.entity_id})
+    with pytest.raises(ValueError, match="measured_source_required"):
+        build_mapping(hass, DEVICE, ATTRIBUTES, inputs)
+
+
+async def test_existing_estimated_queue_fingerprints_survive_mapping_upgrade(hass, config_entry):
+    *_, inputs = register_sources(hass, config_entry)
+    mapping = build_mapping(hass, DEVICE, ATTRIBUTES, inputs)
+    legacy_mapping = asdict(mapping)
+    legacy_mapping.pop("power_basis")
+    legacy_identity = {key: value for key, value in legacy_mapping.items() if key not in {"device_key", "name", "estimate_profile"}}
+    old_fingerprint = hashlib.sha256(json.dumps(legacy_identity, sort_keys=True).encode()).hexdigest()
+    saved = {**environment_settings(environment_response(), TENANT), "mappings": [legacy_mapping]}
+    restored = TelemetrySettings.from_dict(saved, TENANT).mappings[0]
+    assert restored.power_basis == "estimated"
+    assert restored.fingerprint == old_fingerprint
 
 
 async def test_mapping_stores_registry_ids_and_accepts_integral_provenance(hass, config_entry):

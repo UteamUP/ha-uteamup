@@ -21,7 +21,10 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, TELEMETRY_SAMPLE_SECONDS
-from .telemetry_config import TelemetryMapping, TelemetrySettings, device_has_mac, source_belongs_to_device, source_unit
+from .telemetry_config import (
+    TelemetryMapping, TelemetrySettings, device_has_mac, measured_wiz_sources_match,
+    source_belongs_to_device, source_unit,
+)
 from .telemetry_queue import QueuedEnvelope, QueueStats, TelemetryQueue
 from .telemetry_transport import TelemetryTransport, retry_delay
 
@@ -49,7 +52,7 @@ def _estimate_parameters(attributes: Mapping[str, Any]) -> dict[str, float]:
 
 
 class SourceUnavailable(ValueError):
-    """An observation cannot truthfully represent its configured physical bulb."""
+    """An observation cannot truthfully represent its configured physical device."""
 
 
 def sample_envelope(
@@ -73,6 +76,8 @@ def sample_envelope(
         for state in states
     ) or states[0].state not in {"on", "off"}:
         raise SourceUnavailable("unavailable")
+    if mapping.power_basis == "measured" and not measured_wiz_sources_match(hass, source, (power, energy)):
+        raise SourceUnavailable("measured_source_required")
     values: list[float] = []
     for entity, state, unit in ((power, states[1], "W"), (energy, states[2], "kWh")):
         if source_unit(entity, state) != unit:
@@ -80,7 +85,7 @@ def sample_envelope(
         if not source_belongs_to_device(hass, entity.entity_id, mapping.ha_device_id, source.id):
             raise SourceUnavailable("device_mismatch")
         profile = state.attributes.get("estimate_profile")
-        if profile and profile != mapping.estimate_profile:
+        if mapping.power_basis == "estimated" and profile and profile != mapping.estimate_profile:
             raise SourceUnavailable("profile_mismatch")
         try:
             value = float(state.state)
@@ -95,15 +100,16 @@ def sample_envelope(
         "eventId": event_id, "tenantGuid": settings.tenant_guid, "deviceGuid": mapping.device_guid,
         "observedAt": timestamp,
         "metadata": {
-            "source": "homeassistant", "powerBasis": "estimated", "estimateProfile": mapping.estimate_profile,
+            "source": "homeassistant", "powerBasis": mapping.power_basis,
+            **({"estimateProfile": mapping.estimate_profile, "estimateParameters": _estimate_parameters(states[1].attributes)}
+               if mapping.power_basis == "estimated" else {}),
             "sourceRegistryId": source.id, "powerSourceRegistryId": power.id, "energySourceRegistryId": energy.id,
             "powerStateUpdatedAt": states[1].last_updated.isoformat(),
             "energyStateUpdatedAt": states[2].last_updated.isoformat(),
-            "estimateParameters": _estimate_parameters(states[1].attributes),
         },
         "points": [
             {"pointId": str(uuid4()), "assetGuid": mapping.asset_guid, "attributeDefinitionGuid": attribute,
-             "value": value, "observedAt": timestamp, "unit": unit, "quality": "estimated"}
+             "value": value, "observedAt": timestamp, "unit": unit, "quality": mapping.power_basis}
             for attribute, value, unit in (
                 (mapping.power_attribute_guid, values[0], "W"), (mapping.energy_attribute_guid, values[1], "kWh"),
             )

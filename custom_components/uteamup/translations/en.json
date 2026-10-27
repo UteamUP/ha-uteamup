@@ -57,19 +57,19 @@
           "scan_interval": "Refresh interval (seconds)",
           "enable_webhooks": "Receive live events",
           "assignee_guid": "Only list work orders assigned to (user GUID)",
-          "enable_telemetry": "Send estimated energy to dedicated IoT"
+          "enable_telemetry": "Send energy readings to dedicated IoT"
         },
         "data_description": {
           "enable_webhooks": "Needs the Enterprise plan and a public Home Assistant URL, such as Home Assistant Cloud. Polling continues either way.",
           "assignee_guid": "Leave empty to list every open work order.",
-          "enable_telemetry": "Optional. Review existing bulbs and their estimated W/cumulative-kWh sources next. Requires an already active, healthy dedicated tenant endpoint. Turning this off stops delivery and keeps the local queue."
+          "enable_telemetry": "Optional. Review existing lights or sockets and their W/cumulative-kWh sources next. Requires an already active, healthy dedicated tenant endpoint. Turning this off stops delivery and keeps the local queue."
         }
       },
       "telemetry_devices": {
-        "title": "Choose existing IoT bulbs",
+        "title": "Choose existing IoT devices",
         "description": "Select the existing UteamUP devices to configure. Each must already be linked to its asset and physical MAC address. Unchecked devices stop capturing; their queued readings remain retained for review. This does not provision infrastructure or purchase anything.",
         "data": {
-          "devices": "Bulbs",
+          "devices": "Devices",
           "retry_quarantined": "Retry retained quarantined readings"
         },
         "data_description": {
@@ -78,24 +78,26 @@
       },
       "telemetry_mapping": {
         "title": "Review {device} ({position}/{count})",
-        "description": "Choose this bulb's physical light and its estimated W and cumulative-kWh entities. Only sources belonging to this physical bulb are shown. Choose a cumulative energy meter, rather than a monthly consumption field. Enter the version of the provisional estimate profile and this bulb's own ingestion key.",
+        "description": "Choose this device's light or switch, its power source and its cumulative energy source. Only sources belonging to this physical device are shown. Select whether power is estimated or measured by the WiZ socket. Use this device's own ingestion key.",
         "data": {
-          "source_entity": "Physical bulb",
-          "power_entity": "Estimated power source (W)",
-          "energy_entity": "Cumulative estimated energy source (kWh)",
-          "power_attribute_guid": "UteamUP estimated-power meter",
+          "source_entity": "Physical light or socket",
+          "power_entity": "Power source (W)",
+          "energy_entity": "Cumulative energy source (kWh)",
+          "power_attribute_guid": "UteamUP power meter",
           "energy_attribute_guid": "UteamUP cumulative-energy meter",
-          "estimate_profile": "Estimate profile and version",
+          "power_basis": "Reading type",
+          "estimate_profile": "Estimate profile and version (estimates only)",
           "device_key": "Device ingestion key"
         },
         "data_description": {
-          "estimate_profile": "Use the same version shown by the HA estimate source, for example demo-linear-v1. Estimates remain approximate and adjustable; they are not electricity billing measurements.",
-          "device_key": "Paste the narrow ingestion key for this bulb. Leave blank to keep its previously saved key. Keys are never prefilled or included in diagnostics."
+          "power_basis": "Measured requires the WiZ socket power sensor and its own cumulative energy sensor or Integral helper. Existing light estimates remain estimated.",
+          "estimate_profile": "Leave blank for measured socket readings. For estimates, use the same version shown by the HA estimate source, for example demo-linear-v1. Estimates remain approximate and adjustable; they are not electricity billing measurements.",
+          "device_key": "Paste the narrow ingestion key for this device. Leave blank to keep its previously saved key. Keys are never prefilled or included in diagnostics."
         }
       },
       "telemetry_confirm": {
-        "title": "Enable estimated energy delivery",
-        "description": "Enable the reviewed mappings for {count} bulbs to {endpoint}. Samples are taken every 60 seconds and marked estimated. Unavailable bulbs produce no new readings or heartbeat. Already queued observations can replay later with their original timestamps. The bounded queue retains rejected data and reports delivery failures separately from bulb availability. Submit to enable, or close this dialog to keep the existing settings."
+        "title": "Enable energy delivery",
+        "description": "Enable the reviewed mappings for {count} devices to {endpoint}. Samples are taken every 60 seconds and retain the selected measured or estimated reading type. Unavailable devices produce no new readings or heartbeat. Already queued observations can replay later with their original timestamps. The bounded queue retains rejected data and reports delivery failures separately from device availability. Submit to enable, or close this dialog to keep the existing settings."
       }
     },
     "error": {
@@ -106,11 +108,12 @@
       "environment_unavailable": "Dedicated ingestion is not ready. An active entitlement also needs a healthy HTTPS endpoint. Finish its setup in UteamUP first.",
       "no_devices": "Choose at least one active existing IoT device with an asset and physical MAC address.",
       "no_telemetry_meters": "This asset needs active numeric W and cumulative-kWh meter attributes with Allow IoT updates enabled. Add them in UteamUP, then reopen Configure.",
-      "source_missing": "The physical light must be registered in Home Assistant and linked to its WiZ device.",
-      "device_mismatch": "The selected sources do not belong to this physical bulb. Check their MAC and source_device_id/source metadata.",
+      "source_missing": "The physical light or switch must be registered in Home Assistant and linked to its device.",
+      "device_mismatch": "The selected sources do not belong to this physical device. Check their MAC and source_device_id/source metadata.",
       "unit_mismatch": "Select registered W and kWh sensor entities with the correct units.",
       "attribute_mismatch": "Select active W and cumulative-kWh meter attributes belonging to this asset with Allow IoT updates enabled.",
-      "invalid_mapping": "Enter the estimate profile version and a valid ingestion key for this bulb."
+      "measured_source_required": "Measured readings require a native WiZ socket power sensor and energy from that same sensor. Estimated or unrelated helpers cannot be marked measured.",
+      "invalid_mapping": "Choose a reading type and enter a valid device ingestion key. Estimated readings also need an estimate profile version."
     }
   },
   "entity": {
@@ -144,7 +147,7 @@
       },
       "telemetry_queue": { "name": "Queued IoT observations", "unit_of_measurement": "observations" },
       "telemetry_quarantined": { "name": "Quarantined IoT observations", "unit_of_measurement": "observations" },
-      "telemetry_sources_available": { "name": "Available IoT bulb sources", "unit_of_measurement": "bulbs" },
+      "telemetry_sources_available": { "name": "Available IoT device sources", "unit_of_measurement": "devices" },
       "telemetry_last_success": { "name": "Last acknowledged IoT delivery" }
     },
     "binary_sensor": {
@@ -272,6 +275,12 @@
     }
   },
   "selector": {
+    "power_basis": {
+      "options": {
+        "estimated": "Estimated from a profile",
+        "measured": "Measured by the WiZ socket"
+      }
+    },
     "severity": {
       "options": { "low": "Low", "medium": "Medium", "high": "High", "critical": "Critical" }
     },

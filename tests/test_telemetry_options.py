@@ -14,7 +14,7 @@ from custom_components.uteamup.const import CONF_ENABLE_TELEMETRY, CONF_ENABLE_W
 from .conftest import BASE, mock_login
 from .test_telemetry_config import (
     ASSET_GUID, ASSET_TYPE, ASSET_TYPE_GUID, ATTRIBUTES, DEVICE, DEVICE_GUID, DEVICE_KEY, ENDPOINT,
-    environment_response, register_sources,
+    environment_response, register_socket_sources, register_sources,
 )
 
 
@@ -59,6 +59,23 @@ async def test_complete_mapping_flow_keeps_secret_out_of_form_defaults(hass, con
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert config_entry.options[CONF_ENABLE_WEBHOOKS] is False
     assert config_entry.options[CONF_TELEMETRY]["mappings"][0]["device_key"] == DEVICE_KEY
+
+
+async def test_measured_socket_can_be_selected_and_saved_without_an_estimate_profile(hass, config_entry, aioclient_mock):
+    result = await begin(hass, config_entry, aioclient_mock)
+    socket, _, _, inputs = register_socket_sources(hass, config_entry)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"devices": [DEVICE_GUID]})
+    rendered = renderable(result)
+    source = next(field for field in rendered if field["name"] == "source_entity")
+    assert source["selector"]["entity"]["domain"] == ["light", "switch"]
+    assert source["selector"]["entity"]["include_entities"] == [socket.entity_id]
+    result = await hass.config_entries.options.async_configure(result["flow_id"], inputs)
+    assert result["step_id"] == "telemetry_confirm"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    mapping = config_entry.options[CONF_TELEMETRY]["mappings"][0]
+    assert mapping["power_basis"] == "measured"
+    assert mapping["estimate_profile"] == ""
 
 
 async def test_unhealthy_environment_cannot_reach_mapping_step(hass, config_entry, aioclient_mock):

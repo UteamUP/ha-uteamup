@@ -22,7 +22,7 @@ from custom_components.uteamup.telemetry_transport import DeliveryResult
 from .conftest import API_KEY, API_SECRET, TENANT, mock_login, setup_entry
 from .test_init import _state
 from .test_telemetry_config import (
-    ATTRIBUTES, DEVICE, DEVICE_GUID, DEVICE_KEY, environment_response, register_sources,
+    ATTRIBUTES, DEVICE, DEVICE_GUID, DEVICE_KEY, environment_response, register_socket_sources, register_sources,
 )
 
 
@@ -45,6 +45,41 @@ async def test_current_observation_exports_estimate_metadata_and_correct_meter_u
         ("W", 0.3, "estimated"), ("kWh", 1.2, "estimated"),
     ]
     assert len({item["pointId"] for item in body["points"]}) == 2
+
+
+async def test_socket_exports_measured_values_without_estimation_metadata(hass, config_entry):
+    *_, inputs = register_socket_sources(hass, config_entry)
+    mapping = build_mapping(hass, DEVICE, ATTRIBUTES, inputs)
+    settings = TelemetrySettings.from_dict({
+        **environment_settings(environment_response(), TENANT), "mappings": [asdict(mapping)],
+    }, TENANT)
+    body = json.loads(sample_envelope(hass, settings, mapping, dt_util.utcnow()).payload)
+    assert body["metadata"]["powerBasis"] == "measured"
+    assert "estimateProfile" not in body["metadata"]
+    assert "estimateParameters" not in body["metadata"]
+    assert [(point["unit"], point["value"], point["quality"]) for point in body["points"]] == [
+        ("W", 88, "measured"), ("kWh", 11.937, "measured"),
+    ]
+
+
+@pytest.mark.parametrize("reason", ["unavailable", "measured_source_required"])
+async def test_socket_stops_capture_when_sources_disappear_or_become_estimated(hass, config_entry, reason):
+    socket, power, _, inputs = register_socket_sources(hass, config_entry)
+    mapping = build_mapping(hass, DEVICE, ATTRIBUTES, inputs)
+    settings = TelemetrySettings.from_dict({
+        **environment_settings(environment_response(), TENANT), "mappings": [asdict(mapping)],
+    }, TENANT)
+    if reason == "unavailable":
+        hass.states.async_set(socket.entity_id, STATE_UNAVAILABLE)
+    else:
+        hass.states.async_set(power.entity_id, "88", {"unit_of_measurement": "W", "power_basis": "estimated"})
+    telemetry = UteamupTelemetry(hass, config_entry, settings)
+    telemetry.transport.async_send = AsyncMock()
+    await telemetry.async_sample_once()
+    assert telemetry.health.sources == {DEVICE_GUID: reason}
+    assert (await telemetry.queue.async_stats()).pending == 0
+    assert not await telemetry.async_send_once()
+    telemetry.transport.async_send.assert_not_awaited()
 
 
 async def test_serialized_parameters_are_bounded_and_never_copy_unrelated_attributes(hass, config_entry):

@@ -53,7 +53,10 @@ from .const import (
 )
 from .coordinator import UteamupConfigEntry
 from .services import valid_guid
-from .telemetry_config import TelemetryMapping, build_mapping, compatible_meter, environment_settings, mapping_source_choices
+from .telemetry_config import (
+    POWER_BASES, SOURCE_DOMAINS, TelemetryMapping, build_mapping, compatible_meter,
+    environment_settings, mapping_source_choices,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -153,7 +156,7 @@ class UteamupConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class UteamupOptionsFlow(OptionsFlow):
-    """Keep ordinary options compact; configure optional telemetry one bulb at a time."""
+    """Keep ordinary options compact; configure optional telemetry one device at a time."""
 
     def __init__(self) -> None:
         self._options: dict[str, Any] = {}
@@ -240,7 +243,7 @@ class UteamupOptionsFlow(OptionsFlow):
         return self.async_show_form(step_id="telemetry_devices", data_schema=schema, errors=errors)
 
     async def async_step_telemetry_mapping(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Review one physical bulb, its two source entities and its two meter attributes."""
+        """Review one physical device, its meter sources and its UteamUP attributes."""
         device = self._devices[self._selected[len(self._mappings)]]
         previous_data = next((
             item for item in self.config_entry.options.get(CONF_TELEMETRY, {}).get("mappings", [])
@@ -264,6 +267,7 @@ class UteamupOptionsFlow(OptionsFlow):
             except (ValueError, KeyError, TypeError) as err:
                 errors["base"] = str(err) if str(err) in {
                     "source_missing", "device_mismatch", "unit_mismatch", "attribute_mismatch", "invalid_mapping",
+                    "measured_source_required",
                 } else "invalid_mapping"
             else:
                 self._mappings.append(mapping)
@@ -285,6 +289,7 @@ class UteamupOptionsFlow(OptionsFlow):
                 "power_attribute_guid": previous.power_attribute_guid,
                 "energy_attribute_guid": previous.energy_attribute_guid,
                 "estimate_profile": previous.estimate_profile,
+                "power_basis": previous.power_basis,
             })
         # A rejected form preserves selections, but never echoes the credential as a default.
         defaults.update({key: value for key, value in (user_input or {}).items() if key != CONF_DEVICE_KEY})
@@ -294,7 +299,7 @@ class UteamupOptionsFlow(OptionsFlow):
             errors["base"] = "device_mismatch"
             choices = {name: [] for name in ("source_entity", "power_entity", "energy_entity")}
         fields: dict[Any, Any] = {}
-        for name, domain in (("source_entity", "light"), ("power_entity", "sensor"), ("energy_entity", "sensor")):
+        for name, domain in (("source_entity", list(SOURCE_DOMAINS)), ("power_entity", "sensor"), ("energy_entity", "sensor")):
             if name not in defaults and len(choices[name]) == 1:
                 defaults[name] = choices[name][0]
             fields[vol.Required(name, description={"suggested_value": defaults.get(name)})] = EntitySelector(
@@ -312,7 +317,10 @@ class UteamupOptionsFlow(OptionsFlow):
             )
             if not choices:
                 errors.setdefault("base", "no_telemetry_meters")
-        fields[vol.Required("estimate_profile", default=defaults.get("estimate_profile", ""))] = cv.string
+        fields[vol.Required("power_basis", default=defaults.get("power_basis", "estimated"))] = SelectSelector(
+            SelectSelectorConfig(options=list(POWER_BASES), translation_key="power_basis", mode=SelectSelectorMode.DROPDOWN)
+        )
+        fields[vol.Optional("estimate_profile", default=defaults.get("estimate_profile", ""))] = cv.string
         fields[vol.Optional(CONF_DEVICE_KEY)] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
         return self.async_show_form(
             step_id="telemetry_mapping", data_schema=vol.Schema(fields), errors=errors,
@@ -320,7 +328,7 @@ class UteamupOptionsFlow(OptionsFlow):
         )
 
     async def async_step_telemetry_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Make endpoint and estimate semantics visible before enabling traffic."""
+        """Make endpoint and measurement semantics visible before enabling traffic."""
         if user_input is not None:
             return self.async_create_entry(data={
                 **self._options,

@@ -175,9 +175,9 @@ UteamUP as a manual reading, so keep the interval coarse.
 - **Refresh interval**: 30 to 3600 seconds.
 - **Receive live events**: on or off.
 - **Only list work orders assigned to**: a UteamUP user GUID, for a personal to-do list.
-- **Send estimated energy to dedicated IoT**: optional, reviewed per-bulb delivery described below.
+- **Send energy readings to dedicated IoT**: optional, reviewed per-device delivery described below.
 
-## Dedicated estimated energy (optional)
+## Dedicated energy readings (optional)
 
 This sender uses an existing dedicated UteamUP IoT environment. Enabling it does not purchase
 anything or create cloud resources. A complimentary demo must already have its free entitlement
@@ -185,11 +185,11 @@ and a healthy dedicated endpoint in UteamUP; a grant alone does not establish in
 The sender requires Home Assistant **2025.11.3 or newer**. Work orders, calendars and the manual
 meter action keep their existing behavior when the sender is disabled.
 
-Prepare each physical bulb before enabling delivery:
+Prepare each physical light or socket before enabling delivery:
 
-1. Link an existing active UteamUP IoT device to its asset and the bulb's actual MAC address.
-2. Add active meter attributes for **estimated power (W)** and **cumulative estimated energy
-   (kWh)** to that asset's effective type. Enable **Allow IoT updates** for those attributes.
+1. Link an existing active UteamUP IoT device to its asset and the device's actual MAC address.
+2. Add active meter attributes for **power (W)** and **cumulative energy (kWh)** to that asset's
+   effective type. Label estimated meters accordingly. Enable **Allow IoT updates** for those attributes.
    Do not use static rated power or a field describing monthly consumption for a cumulative counter.
 3. Configure HA power/profile sources and a persistent cumulative energy helper. Estimated sources
    must expose `source_device_id` (the physical HA device UUID), `source_entity_registry_id`, or
@@ -198,25 +198,32 @@ Prepare each physical bulb before enabling delivery:
 4. Keep provisional assumptions visible and adjustable in HA. Set `estimate_profile` to a versioned
    name. When actual rated watts are unknown, label the profile provisional; never present it as a
    physical measurement. Verify that the energy helper excludes unavailable periods and Pi downtime.
-5. Obtain a narrow, expiring ingestion key **for each represented bulb**. The ordinary company API
+5. Obtain a narrow, expiring ingestion key **for each represented device**. The ordinary company API
    key discovers configuration; it is never sent to the ingestion endpoint. Its role and creator
    need `IOT.Environment.Read`, `IOT.View`, `Asset.View` and `AssetType.View` for this setup.
 
-In **Settings → Devices & services → UteamUP → Configure**, enable **Send estimated energy to
-dedicated IoT**. Select the existing bulbs, then review one compact mapping per bulb: the physical
-light, estimated W source, cumulative kWh source, corresponding named meters, profile version and
-that bulb's masked ingestion key. Unique matching sources are preselected. Leave an existing key
+For a WiZ socket with native power measurement, use its `switch` entity, its native WiZ W sensor
+and a cumulative kWh sensor from that same device or an Integral helper whose `source` is that W
+sensor. Choose **Measured by the WiZ socket** and leave the estimate profile empty. Estimated
+helpers cannot be marked measured. No power or energy values are invented from the switch's state.
+
+In **Settings → Devices & services → UteamUP → Configure**, enable **Send energy readings to
+dedicated IoT**. Select the existing devices, then review each physical light or switch, W source,
+cumulative kWh source, corresponding named meters, reading type and device ingestion key. Estimates
+also require a profile version. Unique matching sources are preselected. Leave an existing key
 blank to retain it. The final confirmation shows the discovered HTTPS endpoint and device count.
 No traffic starts before that confirmation is saved.
 
 Every 60 seconds, the sender observes available sources and durably stores one v1 envelope with
-both readings and immutable event/point UUIDs. Readings carry `quality: estimated`, the power basis
-and profile version. Numeric `assumed_full_power_w` and `assumed_standby_power_w` attributes
+both readings and immutable event/point UUIDs. Native socket readings carry `quality: measured`
+and `powerBasis: measured`; they do not include an estimate profile or assumed wattage. Estimated
+readings retain `quality: estimated`, the power basis and profile version. Numeric
+`assumed_full_power_w` and `assumed_standby_power_w` attributes
 between 0 and 1,000 W are retained as estimate parameters with each observation; unrelated source
 attributes are never copied. It does not calculate electricity cost or duplicate HA's energy integration.
 Unavailable, unknown, restored, wrong-unit or cross-device sources produce no new reading or
 heartbeat. Previously captured observations can still replay with their original timestamps while
-a bulb is unavailable; replay does not mean that the physical bulb is currently online.
+a device is unavailable; replay does not mean that the physical device is currently online.
 
 Delivery verifies TLS, refuses redirects and uses the device's own `X-Device-Key`. Only a matching
 accepted/duplicate acknowledgement removes an envelope. Timeouts, server errors and throttling
@@ -224,7 +231,7 @@ back off with jitter and honor `Retry-After`. Rejected keys, endpoints or payloa
 affected event and stop new capture for that device; other devices continue.
 
 The **Dedicated IoT delivery**, **Queued IoT observations**, **Quarantined IoT observations**,
-**Available IoT bulb sources** and **Last acknowledged IoT delivery** diagnostic sensors separate
+**Available IoT device sources** and **Last acknowledged IoT delivery** diagnostic sensors separate
 source availability from transport health. Queue attributes include bytes, retrying/blocked device
 counts and `missed_samples`. Repairs explain storage, rejection and overflow conditions. Device
 keys are recursively redacted from integration diagnostics and never stored in queue payloads.
@@ -259,7 +266,7 @@ reviewed archive's directory, then start HA. Do not copy a second nested `uteamu
 release must come from the reviewed committed revision, with its manifest version and checksum
 recorded; an unpublished local change is not a HACS update.
 
-To pause, clear **Send estimated energy to dedicated IoT** and save the first options screen.
+To pause, clear **Send energy readings to dedicated IoT** and save the first options screen.
 This requires no API connection, stops both background tasks, and retains mappings and queue.
 Re-enable through the reviewed setup flow to resume. For immediate server-side revocation, revoke
 the affected device ingestion keys in UteamUP; this does not erase meter history. Removing a bulb
