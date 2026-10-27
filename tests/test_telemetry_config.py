@@ -9,6 +9,7 @@ import json
 import pytest
 
 from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.const import STATE_UNAVAILABLE
 
 from custom_components.uteamup.const import CONF_TENANT_GUID
 from custom_components.uteamup.telemetry_config import (
@@ -163,6 +164,25 @@ async def test_existing_masked_key_is_preserved_when_left_blank(hass, config_ent
     updated = build_mapping(hass, DEVICE, ATTRIBUTES, {**inputs, "device_key": ""}, previous)
     assert updated.device_key == DEVICE_KEY
     assert updated.fingerprint == previous.fingerprint
+
+
+@pytest.mark.parametrize("register", [register_sources, register_socket_sources])
+async def test_unchanged_unavailable_mapping_can_be_retained_but_not_replaced(hass, config_entry, register):
+    source, power, energy, inputs = register(hass, config_entry)
+    previous = build_mapping(hass, DEVICE, ATTRIBUTES, inputs)
+    for entity in (source, power, energy):
+        hass.states.async_set(entity.entity_id, STATE_UNAVAILABLE)
+    unchanged = {**inputs, "device_key": ""}
+    assert build_mapping(hass, DEVICE, ATTRIBUTES, unchanged, previous) == previous
+    with pytest.raises(ValueError, match="device_mismatch"):
+        build_mapping(hass, DEVICE, ATTRIBUTES, inputs)
+    with pytest.raises(ValueError, match="device_mismatch"):
+        build_mapping(hass, {**DEVICE, "assetGuid": DEVICE_GUID}, ATTRIBUTES, unchanged, previous)
+    with pytest.raises(ValueError, match="device_mismatch"):
+        build_mapping(hass, DEVICE, ATTRIBUTES, {**inputs, "device_key": "changed-key"}, previous)
+    disabled = [{"definitions": [{**item, "allowIoTUpdates": False} for item in ATTRIBUTES[0]["definitions"]]}]
+    with pytest.raises(ValueError, match="attribute_mismatch"):
+        build_mapping(hass, DEVICE, disabled, unchanged, previous)
 
 
 @pytest.mark.parametrize("flag", ["isActive", "allowIoTUpdates"])

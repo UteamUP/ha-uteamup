@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT
+from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
@@ -268,8 +268,6 @@ def build_mapping(
     for entity, unit in ((power, "W"), (energy, "kWh")):
         if entity is None or entity.disabled or entity.domain != "sensor" or source_unit(entity, hass.states.get(entity.entity_id)) != unit:
             raise ValueError("unit_mismatch")
-        if not source_belongs_to_device(hass, entity.entity_id, source.device_id, source.id):
-            raise ValueError("device_mismatch")
     definitions = {item["attributeDefinitionGuid"]: item for group in attributes for item in group.get("definitions", [])}
     for field_name, unit in (("power_attribute_guid", "W"), ("energy_attribute_guid", "kWh")):
         definition = definitions.get(inputs[field_name]) or {}
@@ -283,11 +281,25 @@ def build_mapping(
         or (basis == "estimated" and not profile)
     ):
         raise ValueError("invalid_mapping")
-    if basis == "measured" and not measured_wiz_sources_match(hass, source, (power, energy)):
-        raise ValueError("measured_source_required")
-    return TelemetryMapping(
+    mapping = TelemetryMapping(
         public_guid(device["externalGuid"]), public_guid(device["assetGuid"]), str(device["name"]),
         source.device_id, mac, source.id, power.id, energy.id,
         public_guid(inputs["power_attribute_guid"]), public_guid(inputs["energy_attribute_guid"]),
         profile if basis == "estimated" else "", key, basis,
     )
+    # An unavailable template can lose its live provenance attributes. Keeping an
+    # identical saved mapping must not block configuring another device. Capture
+    # still revalidates availability and provenance before producing any readings.
+    unavailable = any(
+        (state := hass.states.get(entity.entity_id)) is None
+        or state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN}
+        for entity in (source, power, energy)
+    )
+    if mapping == previous and unavailable:
+        return mapping
+    for entity in (power, energy):
+        if not source_belongs_to_device(hass, entity.entity_id, source.device_id, source.id):
+            raise ValueError("device_mismatch")
+    if basis == "measured" and not measured_wiz_sources_match(hass, source, (power, energy)):
+        raise ValueError("measured_source_required")
+    return mapping

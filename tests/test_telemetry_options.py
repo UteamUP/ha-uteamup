@@ -1,17 +1,21 @@
 """The telemetry options use friendly selectors and retain existing settings."""
 
+from dataclasses import asdict
 from unittest.mock import patch
 
 import pytest
 import voluptuous_serialize
 
-from homeassistant.const import CONF_SCAN_INTERVAL
+from homeassistant.const import CONF_SCAN_INTERVAL, STATE_UNAVAILABLE
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import config_validation as cv
+from homeassistant.util import dt as dt_util
 
 from custom_components.uteamup.const import CONF_ENABLE_TELEMETRY, CONF_ENABLE_WEBHOOKS, CONF_TELEMETRY
+from custom_components.uteamup.telemetry import SourceUnavailable, sample_envelope
+from custom_components.uteamup.telemetry_config import TelemetrySettings, build_mapping, environment_settings
 
-from .conftest import BASE, mock_login
+from .conftest import BASE, TENANT, mock_login
 from .test_telemetry_config import (
     ASSET_GUID, ASSET_TYPE, ASSET_TYPE_GUID, ATTRIBUTES, DEVICE, DEVICE_GUID, DEVICE_KEY, ENDPOINT,
     environment_response, register_socket_sources, register_sources,
@@ -76,6 +80,25 @@ async def test_measured_socket_can_be_selected_and_saved_without_an_estimate_pro
     mapping = config_entry.options[CONF_TELEMETRY]["mappings"][0]
     assert mapping["power_basis"] == "measured"
     assert mapping["estimate_profile"] == ""
+
+
+async def test_options_can_keep_an_offline_device_without_emitting_readings(hass, config_entry, aioclient_mock):
+    result = await begin(hass, config_entry, aioclient_mock)
+    light, power, energy, inputs = register_sources(hass, config_entry)
+    previous = build_mapping(hass, DEVICE, ATTRIBUTES, inputs)
+    saved = {**environment_settings(environment_response(), TENANT), "mappings": [asdict(previous)]}
+    hass.config_entries.async_update_entry(config_entry, options={CONF_TELEMETRY: saved})
+    for entity in (light, power, energy):
+        hass.states.async_set(entity.entity_id, STATE_UNAVAILABLE)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"devices": [DEVICE_GUID]})
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {**inputs, "device_key": ""})
+    assert result["step_id"] == "telemetry_confirm"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    settings = TelemetrySettings.from_dict(config_entry.options[CONF_TELEMETRY], TENANT)
+    assert settings.mappings[0] == previous
+    with pytest.raises(SourceUnavailable, match="unavailable"):
+        sample_envelope(hass, settings, settings.mappings[0], dt_util.utcnow())
 
 
 async def test_unhealthy_environment_cannot_reach_mapping_step(hass, config_entry, aioclient_mock):
