@@ -40,10 +40,17 @@ KEY_FILE = os.environ.get("UTEAMUP_LIVE_KEY_FILE")
 pytestmark = pytest.mark.skipif(not KEY_FILE, reason="set UTEAMUP_LIVE_KEY_FILE to run against a live API")
 
 
+class LiveConfiguration(dict):
+    """Keep credentials out of pytest's fixture-argument failure reports."""
+
+    def __repr__(self) -> str:
+        return repr({**self, "apiKey": "[REDACTED]", "secret": "[REDACTED]"})
+
+
 @pytest.fixture
 def live() -> dict:
     with open(KEY_FILE, encoding="utf-8") as handle:
-        return json.load(handle)
+        return LiveConfiguration(json.load(handle))
 
 
 async def _add_entry(hass: HomeAssistant, live: dict):

@@ -322,6 +322,14 @@ uv pip install --python .venv/bin/python -r requirements_test.txt
 `assetGuid` and `attributeDefinitionGuid`. Use a development API: it creates a quick report,
 a meter reading and a temporary webhook subscription.
 
+Keep that file outside the repository with permissions `0600`. For the local pytest harness,
+use the numeric loopback address `https://127.0.0.1:5002`; this avoids sharing a DNS resolver
+between pytest event loops. With the local connection configured, run every test including live:
+
+```bash
+UTEAMUP_FINAL_GOAL_GATE=1 UTEAMUP_LIVE_KEY_FILE="$HOME/.uteamup/homeassistant-live-local.json" .venv/bin/pytest
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
