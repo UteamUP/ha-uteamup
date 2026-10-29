@@ -166,5 +166,34 @@ def network_client_observations(
                 "pointId": str(uuid4()), "assetGuid": binding.asset_guid,
                 "attributeDefinitionGuid": getattr(binding, f"{name}_attribute_guid"),
                 "value": values[name], "observedAt": client["sourceObservedAt"], "unit": unit, "quality": "measured",
+                "metadata": {"networkClientMac": client["macAddress"]},
             })
     return clients, points
+
+
+def resolved_client_mappings(
+    hass: HomeAssistant, mapping: NetworkTelemetryMapping, now: datetime, links: list[dict[str, Any]],
+) -> tuple[DecoClientMapping, ...]:
+    """Only complete current server links authorize observations; unlinks override saved HA choices."""
+    if not isinstance(links, list) or len(links) > 500:
+        raise ValueError("invalid_client_links")
+    observed = {client["macAddress"]: client for client in deco_clients(hass, mapping.tracker_registry_id, now)}
+    result = []
+    seen = set()
+    for link in links:
+        if not isinstance(link, dict) or public_guid(link.get("gatewayDeviceGuid")) != mapping.device_guid:
+            raise ValueError("invalid_client_links")
+        mac = normalize_mac(link.get("macAddress"))
+        if mac in seen:
+            raise ValueError("invalid_client_links")
+        seen.add(mac)
+        if link.get("state") != "linked" or mac not in observed:
+            continue
+        result.append(DecoClientMapping(
+            tracker_registry_id=observed[mac]["trackerRegistryId"], mac_address=mac,
+            asset_guid=public_guid(link.get("assetGuid")),
+            download_attribute_guid=public_guid(link.get("downloadAttributeGuid")),
+            upload_attribute_guid=public_guid(link.get("uploadAttributeGuid")),
+            connected_attribute_guid=public_guid(link.get("connectedAttributeGuid")),
+        ))
+    return tuple(result)

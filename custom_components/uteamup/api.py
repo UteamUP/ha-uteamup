@@ -249,6 +249,12 @@ class UteamupClient:
     async def async_get_asset(self, asset_guid: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/asset/by-guid/{asset_guid}")
 
+    async def async_get_network_client_links(self, gateway_guid: str) -> list[dict[str, Any]]:
+        return await self._request("GET", f"/api/iot/devices/{gateway_guid}/network-clients/links")
+
+    async def async_link_network_client(self, gateway_guid: str, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", f"/api/iot/devices/{gateway_guid}/network-clients/links", json_body=body)
+
     async def async_get_asset_types(self) -> list[dict[str, Any]]:
         return await self._request("GET", "/api/asset-type")
 

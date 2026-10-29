@@ -62,7 +62,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: UteamupConfigEntry) -> b
         cmms_error = err
 
     coordinator = UteamupCoordinator(hass, entry, client)
-    telemetry = UteamupTelemetry(hass, entry, settings) if settings else None
+    telemetry = UteamupTelemetry(hass, entry, settings, client) if settings else None
     entry.runtime_data = UteamupRuntimeData(client, coordinator, telemetry)
     if settings:
         # The previously reviewed narrow device keys can deliver queued readings during

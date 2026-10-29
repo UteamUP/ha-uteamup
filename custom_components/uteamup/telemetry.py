@@ -8,7 +8,7 @@ import logging
 import math
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -21,11 +21,13 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, TELEMETRY_SAMPLE_SECONDS
-from .deco_clients import MAX_SOURCE_AGE, network_client_observations
+from .api import UteamupClient, UteamupError
+from .deco_clients import MAX_SOURCE_AGE, deco_clients, network_client_observations, resolved_client_mappings
 from .telemetry_config import (
     NETWORK_METRICS, NetworkTelemetryMapping, TelemetryMapping, TelemetrySettings,
     device_has_mac, measured_wiz_sources_match, network_unit_matches, source_belongs_to_device,
     source_unit, validate_deco_tracker,
+    normalize_mac,
 )
 from .telemetry_queue import QueuedEnvelope, QueueStats, TelemetryQueue
 from .telemetry_transport import TelemetryTransport, retry_delay
@@ -124,6 +126,7 @@ def sample_envelope(
 
 def sample_network_envelope(
     hass: HomeAssistant, settings: TelemetrySettings, mapping: NetworkTelemetryMapping, now: datetime,
+    client_mapping: NetworkTelemetryMapping | None = None,
 ) -> QueuedEnvelope:
     """Capture router traffic, client count and online states without inferring availability."""
     registry = er.async_get(hass)
@@ -171,7 +174,7 @@ def sample_network_envelope(
         values[name] = value
     timestamp = now.isoformat()
     event_id = str(uuid4())
-    clients, client_points = network_client_observations(hass, mapping, now)
+    clients, client_points = network_client_observations(hass, client_mapping or mapping, now)
     payload = json.dumps({
         "eventId": event_id,
         "tenantGuid": settings.tenant_guid,
@@ -212,6 +215,7 @@ def sample_network_envelope(
 class TelemetryHealth:
     sender: str = "starting"
     sources: dict[str, str] = field(default_factory=dict)
+    client_links: dict[str, str] = field(default_factory=dict)
     queue: QueueStats = field(default_factory=QueueStats)
     last_success: datetime | None = None
 
@@ -219,10 +223,15 @@ class TelemetryHealth:
 class UteamupTelemetry:
     """Two cancellable tasks share a durable spool but never depend on CMMS polling."""
 
-    def __init__(self, hass: HomeAssistant, entry: UteamupConfigEntry, settings: TelemetrySettings) -> None:
+    def __init__(self, hass: HomeAssistant, entry: UteamupConfigEntry, settings: TelemetrySettings,
+                 client: UteamupClient | None = None) -> None:
         self.hass = hass
         self.entry = entry
         self.settings = settings
+        self._client = client
+        self._client_link_attempts: dict[tuple[str, str], float] = {}
+        self._client_devices: list[dict[str, Any]] = []
+        self._client_devices_at = 0.0
         self.health = TelemetryHealth()
         self.queue = TelemetryQueue(hass, hass.config.path(".storage", f"uteamup_telemetry_{entry.entry_id}.db"))
         self.transport = TelemetryTransport(async_get_clientsession(hass, verify_ssl=True), settings.endpoint)
@@ -265,6 +274,7 @@ class UteamupTelemetry:
         """No payloads, credential hashes or source state attributes leave this boundary."""
         return {
             "sender": self.health.sender, "sources": dict(self.health.sources),
+            "client_links": dict(self.health.client_links),
             "queue": asdict(self.health.queue), "last_success": self.health.last_success,
         }
 
@@ -282,7 +292,11 @@ class UteamupTelemetry:
                 overflow = not await self.queue.async_enqueue(envelope) or overflow
         for mapping in self.settings.network_mappings:
             try:
-                envelope = sample_network_envelope(self.hass, self.settings, mapping, dt_util.utcnow())
+                now = dt_util.utcnow()
+                resolved = await self._async_resolve_clients(mapping, now)
+                # Queued observations retain the asset selected at capture time. Changing a link
+                # affects future samples, not the identity or contents of historical envelopes.
+                envelope = sample_network_envelope(self.hass, self.settings, mapping, now, resolved)
             except SourceUnavailable as err:
                 self.health.sources[mapping.device_guid] = str(err)
                 continue
@@ -291,6 +305,59 @@ class UteamupTelemetry:
                 overflow = not await self.queue.async_enqueue(envelope) or overflow
         self._queue_full = overflow
         await self._async_update_health()
+
+    async def _async_resolve_clients(self, mapping: NetworkTelemetryMapping, now: datetime) -> NetworkTelemetryMapping:
+        if self._client is None:
+            return mapping
+        try:
+            links = await self._client.async_get_network_client_links(mapping.device_guid)
+            self.health.client_links[mapping.device_guid] = "available"
+            # Validate before attempting any writes. A foreign/duplicate response never changes associations.
+            resolved_client_mappings(self.hass, mapping, now, links)
+            linked = {normalize_mac(link["macAddress"]) for link in links}
+            candidates = [row for row in deco_clients(self.hass, mapping.tracker_registry_id, now)
+                          if row["macAddress"] not in linked]
+            if candidates and now.timestamp() - self._client_devices_at >= 300:
+                self._client_devices = await self._client.async_get_iot_devices()
+                self._client_devices_at = now.timestamp()
+            saved = {item.mac_address: item for item in mapping.clients}
+            attempts = 0
+            for row in candidates:
+                key = (mapping.device_guid, row["macAddress"])
+                if now.timestamp() - self._client_link_attempts.get(key, 0) < 300:
+                    continue
+                matching = []
+                for device in self._client_devices:
+                    try:
+                        if (device.get("isActive") and device.get("assetGuid")
+                            and device.get("externalGuid") != mapping.device_guid
+                            and normalize_mac(device.get("macAddress")) == row["macAddress"]):
+                            matching.append(device)
+                    except ValueError:
+                        continue
+                previous = saved.get(row["macAddress"])
+                if previous is None and len(matching) != 1:
+                    continue
+                self._client_link_attempts[key] = now.timestamp()
+                attempts += 1
+                try:
+                    # Existing explicitly reviewed HA mappings migrate without changing their asset.
+                    request = {"macAddress": row["macAddress"], **({"assetGuid": previous.asset_guid}
+                               if previous is not None else {"autoMatch": True})}
+                    links.append(await self._client.async_link_network_client(mapping.device_guid, request))
+                except UteamupError:
+                    self.health.client_links[mapping.device_guid] = "link_not_allowed"
+                if attempts >= 10:
+                    break
+            clients = resolved_client_mappings(self.hass, mapping, now, links)
+            if self.health.client_links.get(mapping.device_guid) != "link_not_allowed":
+                self.health.client_links[mapping.device_guid] = "available"
+            return replace(mapping, clients=clients)
+        except (UteamupError, ValueError, TypeError, KeyError):
+            # Router telemetry and client inventory remain usable during CMMS outages. Client
+            # readings pause because a cached link may have been explicitly revoked in UteamUP.
+            self.health.client_links[mapping.device_guid] = "unavailable"
+            return replace(mapping, clients=())
 
     async def async_send_once(self) -> bool:
         """Return whether a due event was considered; a retry never mutates its payload."""
