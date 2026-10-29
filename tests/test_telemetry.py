@@ -15,14 +15,17 @@ from homeassistant.util import dt as dt_util
 from custom_components.uteamup.const import CONF_ENABLE_TELEMETRY, CONF_ENABLE_WEBHOOKS, CONF_TELEMETRY
 from custom_components.uteamup.coordinator import UteamupData, UteamupRuntimeData
 from custom_components.uteamup.diagnostics import async_get_config_entry_diagnostics
-from custom_components.uteamup.telemetry import UteamupTelemetry, sample_envelope
-from custom_components.uteamup.telemetry_config import TelemetrySettings, build_mapping, environment_settings
+from custom_components.uteamup.telemetry import SourceUnavailable, UteamupTelemetry, sample_envelope, sample_network_envelope
+from custom_components.uteamup.telemetry_config import (
+    TelemetrySettings, build_mapping, build_network_mapping, environment_settings,
+)
 from custom_components.uteamup.telemetry_transport import DeliveryResult
 
 from .conftest import API_KEY, API_SECRET, TENANT, mock_login, setup_entry
 from .test_init import _state
 from .test_telemetry_config import (
-    ATTRIBUTES, DEVICE, DEVICE_GUID, DEVICE_KEY, environment_response, register_socket_sources, register_sources,
+    ATTRIBUTES, DEVICE, DEVICE_GUID, DEVICE_KEY, NETWORK_ATTRIBUTES, NETWORK_DEVICE, NETWORK_DEVICE_GUID,
+    NETWORK_METRICS, environment_response, register_deco_sources, register_socket_sources, register_sources,
 )
 
 
@@ -241,3 +244,57 @@ async def test_diagnostics_recursively_redact_device_keys_and_do_not_export_payl
     assert all(secret not in text for secret in (DEVICE_KEY, API_KEY, API_SECRET))
     assert diagnostic["options"][CONF_TELEMETRY]["mappings"][0]["device_key"] == "**REDACTED**"
     assert "payload" not in diagnostic["telemetry"]
+
+
+def network_configured(hass, config_entry):
+    tracker, entities, inputs = register_deco_sources(hass, config_entry)
+    mapping = build_network_mapping(hass, NETWORK_DEVICE, NETWORK_ATTRIBUTES, inputs)
+    settings = TelemetrySettings.from_dict({
+        **environment_settings(environment_response(), TENANT),
+        "mappings": [],
+        "network_mappings": [asdict(mapping)],
+    }, TENANT)
+    return settings, mapping, tracker, entities
+
+
+async def test_deco_envelope_exports_all_five_metrics_and_binary_states(hass, config_entry):
+    settings, mapping, _, _ = network_configured(hass, config_entry)
+    event = sample_network_envelope(hass, settings, mapping, dt_util.utcnow())
+    body = json.loads(event.payload)
+    assert body["deviceGuid"] == NETWORK_DEVICE_GUID
+    assert body["metadata"]["telemetryKind"] == "network"
+    assert [point["value"] for point in body["points"]] == [32658.875, 740.875, 19, 1, 0]
+    assert [point["unit"] for point in body["points"]] == ["kB/s", "kB/s", "clients", "0/1", "0/1"]
+    assert all(point["quality"] == "measured" for point in body["points"])
+    assert len({point["pointId"] for point in body["points"]}) == 5
+    assert DEVICE_KEY.encode() not in event.payload
+
+
+@pytest.mark.parametrize("name", [name for name, _, _ in NETWORK_METRICS])
+async def test_deco_unavailable_source_emits_no_reading(hass, config_entry, name):
+    settings, mapping, _, entities = network_configured(hass, config_entry)
+    hass.states.async_set(entities[name].entity_id, STATE_UNAVAILABLE)
+    with pytest.raises(SourceUnavailable, match="unavailable"):
+        sample_network_envelope(hass, settings, mapping, dt_util.utcnow())
+
+
+async def test_deco_capture_rechecks_tracker_mac(hass, config_entry):
+    settings, mapping, tracker, _ = network_configured(hass, config_entry)
+    hass.states.async_set(tracker.entity_id, "not_home", {
+        "device_type": "deco",
+        "mac": "00:11:22:33:44:55",
+    })
+    with pytest.raises(SourceUnavailable, match="device_mismatch"):
+        sample_network_envelope(hass, settings, mapping, dt_util.utcnow())
+
+
+@pytest.mark.parametrize("value,attributes,reason", [
+    ("nan", {"unit_of_measurement": "kB/s"}, "invalid_value"),
+    ("-1", {"unit_of_measurement": "kB/s"}, "invalid_value"),
+    ("1", {"unit_of_measurement": "MB/s"}, "unit_mismatch"),
+])
+async def test_deco_invalid_numeric_source_is_not_exported(hass, config_entry, value, attributes, reason):
+    settings, mapping, _, entities = network_configured(hass, config_entry)
+    hass.states.async_set(entities["download"].entity_id, value, attributes)
+    with pytest.raises(SourceUnavailable, match=reason):
+        sample_network_envelope(hass, settings, mapping, dt_util.utcnow())

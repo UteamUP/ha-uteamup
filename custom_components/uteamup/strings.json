@@ -67,7 +67,7 @@
       },
       "telemetry_devices": {
         "title": "Choose existing IoT devices",
-        "description": "Select the existing UteamUP devices to configure. Each must already be linked to its asset and physical MAC address. Unchecked devices stop capturing; their queued readings remain retained for review. This does not provision infrastructure or purchase anything.",
+        "description": "Select the existing UteamUP devices to configure. Each must already be linked to its asset and physical MAC address. Unchecked devices stop capturing; their queued readings remain retained for review. This does not provision infrastructure or purchase anything. Leave energy devices empty to configure only Deco network telemetry.",
         "data": {
           "devices": "Devices",
           "retry_quarantined": "Retry retained quarantined readings"
@@ -97,7 +97,53 @@
       },
       "telemetry_confirm": {
         "title": "Enable energy delivery",
-        "description": "Enable the reviewed mappings for {count} devices to {endpoint}. Samples are taken every 60 seconds and retain the selected measured or estimated reading type. Unavailable devices produce no new readings or heartbeat. Already queued observations can replay later with their original timestamps. The bounded queue retains rejected data and reports delivery failures separately from device availability. Submit to enable, or close this dialog to keep the existing settings."
+        "description": "Enable the reviewed mappings for {count} devices to {endpoint}. Samples are taken every 60 seconds and retain the selected measured or estimated reading type. Unavailable devices produce no new readings or heartbeat. Already queued observations can replay later with their original timestamps. The bounded queue retains rejected data and reports delivery failures separately from device availability. Submit to continue to optional Deco network telemetry, or close this dialog to keep the existing settings."
+      },
+      "telemetry_network_devices": {
+        "title": "Choose Deco network devices",
+        "description": "Optionally select TP-Link Deco routers whose tracker MAC matches the existing UteamUP device. Energy mappings are kept separately. Leave empty to save without network telemetry.",
+        "data": {
+          "devices": "Deco routers"
+        }
+      },
+      "telemetry_network_mapping": {
+        "title": "Review Deco telemetry for {device} ({position}/{count})",
+        "description": "Choose the Deco tracker and its download, upload, client-count, internet and router sources. Rates are those reported by the Deco integration, not a packet capture or independent WAN measurement. The client inventory separately counts the whole network. Use the gateway device ingestion key.",
+        "data": {
+          "tracker_entity": "Main Deco tracker",
+          "download_entity": "download source (kB/s)",
+          "upload_entity": "upload source (kB/s)",
+          "clients_entity": "Connected clients source",
+          "internet_entity": "Internet online source",
+          "router_entity": "Router online source",
+          "download_attribute_guid": "UteamUP download meter",
+          "upload_attribute_guid": "UteamUP upload meter",
+          "clients_attribute_guid": "UteamUP connected clients meter",
+          "internet_attribute_guid": "UteamUP internet online meter",
+          "router_attribute_guid": "UteamUP router online meter",
+          "device_key": "Device ingestion key"
+        },
+        "data_description": {
+          "device_key": "Paste the narrow ingestion key for this router. Leave blank to keep its previously saved key. Keys are never prefilled or included in diagnostics."
+        }
+      },
+      "telemetry_network_confirm": {
+        "title": "Enable Deco network delivery",
+        "description": "Save {count} Deco gateway mappings and {clients} client links to {endpoint}. For each linked asset, add the tenant custom Deco client telemetry type and any missing download (kB/s), upload (kB/s) and connected (0/1) meters. Keep existing types and energy readings. This requires Asset.View/Update and AssetType.View/Create. The gateway sends readings every 60 seconds, retaining the source observation time; unavailable or old sources supply no new client readings. Offline clients supply only connected=0. The inventory includes every discovered client; the selected router count and whole-network count remain separate. Submit to apply. Closing keeps the previous settings. If a request fails, already added types/meters remain and retry reuses them."
+      },
+      "telemetry_clients": {
+        "title": "Link Deco clients to assets (optional)",
+        "description": "The client inventory includes local IP, MAC, connection, reported download and upload. Select clients to add meter readings to existing assets. Exact MAC matches are suggested on the next step; you can change them. Leave empty for inventory only. DNS queries and remote destinations are not supplied by Deco.",
+        "data": {
+          "clients": "Clients to link"
+        }
+      },
+      "telemetry_client_asset": {
+        "title": "Link {client} ({position}/{count})",
+        "description": "MAC: {mac}. A suggested asset comes from a saved link or an exact MAC match. IP addresses and names are not used to match. Each asset can have one client link so its meters cannot overwrite each other. No changes are made until the final confirmation.",
+        "data": {
+          "asset_guid": "Existing UteamUP asset"
+        }
       }
     },
     "error": {
@@ -108,31 +154,62 @@
       "environment_unavailable": "Dedicated ingestion is not ready. An active entitlement also needs a healthy HTTPS endpoint. Finish its setup in UteamUP first.",
       "no_devices": "Choose at least one active existing IoT device with an asset and physical MAC address.",
       "no_telemetry_meters": "This asset needs active numeric W and cumulative-kWh meter attributes with Allow IoT updates enabled. Add them in UteamUP, then reopen Configure.",
-      "source_missing": "The physical light or switch must be registered in Home Assistant and linked to its device.",
-      "device_mismatch": "The selected sources do not belong to this physical device. Check their MAC and source_device_id/source metadata.",
-      "unit_mismatch": "Select registered W and kWh sensor entities with the correct units.",
-      "attribute_mismatch": "Select active W and cumulative-kWh meter attributes belonging to this asset with Allow IoT updates enabled.",
+      "no_network_meters": "This asset needs all five active numeric network meters with the shown units and Allow IoT updates enabled. Add them in UteamUP, then reopen Configure.",
+      "source_missing": "The physical device and its required Home Assistant sources must be registered and linked together.",
+      "device_mismatch": "The selected sources do not belong to this physical device. Check their MAC and source metadata.",
+      "unit_mismatch": "Select registered source entities with the units shown in the form.",
+      "attribute_mismatch": "Select active meter attributes with the shown units belonging to this asset and Allow IoT updates enabled.",
       "measured_source_required": "Measured readings require a native WiZ socket power sensor and energy from that same sensor. Estimated or unrelated helpers cannot be marked measured.",
-      "invalid_mapping": "Choose a reading type and enter a valid device ingestion key. Estimated readings also need an estimate profile version."
+      "invalid_value": "A selected source does not currently contain a valid finite, nonnegative value or online state.",
+      "unavailable": "A required source is unavailable or unknown. Restore it, then reopen Configure.",
+      "invalid_mapping": "Enter a valid device ingestion key and complete the required reading settings.",
+      "client_setup_not_allowed": "The tenant key cannot read or link these assets/types. It needs Asset.View, Asset.Update, AssetType.View and AssetType.Create; ask the tenant administrator to check the key. Existing telemetry settings are retained.",
+      "client_setup_failed": "Could not finish linking clients. Existing settings are retained. Some types or attributes may already have been added; retry reuses them. Check the connection and whether the asset was changed by another user.",
+      "ambiguous_client_type": "Several custom types are named Deco client telemetry. Resolve the duplicate in UteamUP before retrying.",
+      "invalid_client_selection": "Select up to 200 registered Deco clients from this network.",
+      "client_asset_conflict": "Choose an active asset from this tenant that has not already been linked to another selected client."
     }
   },
   "entity": {
     "sensor": {
-      "open_work_orders": { "name": "Open work orders", "unit_of_measurement": "work orders" },
-      "in_progress_work_orders": { "name": "Work orders in progress", "unit_of_measurement": "work orders" },
-      "on_hold_work_orders": { "name": "Work orders on hold", "unit_of_measurement": "work orders" },
-      "overdue_work_orders": { "name": "Overdue work orders", "unit_of_measurement": "work orders" },
+      "open_work_orders": {
+        "name": "Open work orders",
+        "unit_of_measurement": "work orders"
+      },
+      "in_progress_work_orders": {
+        "name": "Work orders in progress",
+        "unit_of_measurement": "work orders"
+      },
+      "on_hold_work_orders": {
+        "name": "Work orders on hold",
+        "unit_of_measurement": "work orders"
+      },
+      "overdue_work_orders": {
+        "name": "Overdue work orders",
+        "unit_of_measurement": "work orders"
+      },
       "stock_alerts": {
         "name": "Stock alerts",
         "unit_of_measurement": "alerts",
         "state_attributes": {
-          "critical": { "name": "Critical" },
-          "low_stock": { "name": "Low stock" },
-          "stockout": { "name": "Stockout" },
-          "action_required": { "name": "Action required" }
+          "critical": {
+            "name": "Critical"
+          },
+          "low_stock": {
+            "name": "Low stock"
+          },
+          "stockout": {
+            "name": "Stockout"
+          },
+          "action_required": {
+            "name": "Action required"
+          }
         }
       },
-      "iot_alerts": { "name": "Unacknowledged IoT alerts", "unit_of_measurement": "alerts" },
+      "iot_alerts": {
+        "name": "Unacknowledged IoT alerts",
+        "unit_of_measurement": "alerts"
+      },
       "telemetry_sender": {
         "name": "Dedicated IoT delivery",
         "state": {
@@ -145,20 +222,39 @@
           "disabled": "Disabled"
         }
       },
-      "telemetry_queue": { "name": "Queued IoT observations", "unit_of_measurement": "observations" },
-      "telemetry_quarantined": { "name": "Quarantined IoT observations", "unit_of_measurement": "observations" },
-      "telemetry_sources_available": { "name": "Available IoT device sources", "unit_of_measurement": "devices" },
-      "telemetry_last_success": { "name": "Last acknowledged IoT delivery" }
+      "telemetry_queue": {
+        "name": "Queued IoT observations",
+        "unit_of_measurement": "observations"
+      },
+      "telemetry_quarantined": {
+        "name": "Quarantined IoT observations",
+        "unit_of_measurement": "observations"
+      },
+      "telemetry_sources_available": {
+        "name": "Available IoT device sources",
+        "unit_of_measurement": "devices"
+      },
+      "telemetry_last_success": {
+        "name": "Last acknowledged IoT delivery"
+      }
     },
     "binary_sensor": {
-      "stock_critical": { "name": "Critical stock" },
-      "iot_alert_active": { "name": "IoT alert" }
+      "stock_critical": {
+        "name": "Critical stock"
+      },
+      "iot_alert_active": {
+        "name": "IoT alert"
+      }
     },
     "calendar": {
-      "work_orders": { "name": "Work orders" }
+      "work_orders": {
+        "name": "Work orders"
+      }
     },
     "todo": {
-      "open_work_orders_list": { "name": "Open work orders" }
+      "open_work_orders_list": {
+        "name": "Open work orders"
+      }
     }
   },
   "issues": {
@@ -184,93 +280,205 @@
     }
   },
   "exceptions": {
-    "entry_required": { "message": "No loaded UteamUP connection matches this action." },
-    "entry_ambiguous": { "message": "Several UteamUP companies are connected. Choose one with config_entry_id." },
-    "forbidden": { "message": "UteamUP did not allow this. Check the API key's role and its creator's permissions. ({error})" },
-    "not_found": { "message": "UteamUP could not find that record in this company. ({error})" },
-    "api_error": { "message": "UteamUP rejected the request: {error}" }
+    "entry_required": {
+      "message": "No loaded UteamUP connection matches this action."
+    },
+    "entry_ambiguous": {
+      "message": "Several UteamUP companies are connected. Choose one with config_entry_id."
+    },
+    "forbidden": {
+      "message": "UteamUP did not allow this. Check the API key's role and its creator's permissions. ({error})"
+    },
+    "not_found": {
+      "message": "UteamUP could not find that record in this company. ({error})"
+    },
+    "api_error": {
+      "message": "UteamUP rejected the request: {error}"
+    }
   },
   "services": {
     "create_work_order": {
       "name": "Create work order",
       "description": "Creates a work order in UteamUP.",
       "fields": {
-        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
-        "name": { "name": "Name", "description": "Short title of the work." },
-        "description": { "name": "Description", "description": "What needs doing." },
-        "priority": { "name": "Priority", "description": "1 low, 2 medium, 3 high, 4 urgent, 5 critical." },
-        "due": { "name": "Due", "description": "When it should be done. Defaults to tomorrow." },
-        "asset_guid": { "name": "Asset GUID", "description": "The asset the work is on." },
-        "assignee_guid": { "name": "Assignee GUID", "description": "The user who should do it." }
+        "config_entry_id": {
+          "name": "UteamUP company",
+          "description": "Needed only when several companies are connected."
+        },
+        "name": {
+          "name": "Name",
+          "description": "Short title of the work."
+        },
+        "description": {
+          "name": "Description",
+          "description": "What needs doing."
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "1 low, 2 medium, 3 high, 4 urgent, 5 critical."
+        },
+        "due": {
+          "name": "Due",
+          "description": "When it should be done. Defaults to tomorrow."
+        },
+        "asset_guid": {
+          "name": "Asset GUID",
+          "description": "The asset the work is on."
+        },
+        "assignee_guid": {
+          "name": "Assignee GUID",
+          "description": "The user who should do it."
+        }
       }
     },
     "create_quick_report": {
       "name": "Report a problem",
       "description": "Files a quick report, which becomes a work order in UteamUP.",
       "fields": {
-        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
-        "description": { "name": "Description", "description": "What is wrong." },
-        "severity": { "name": "Severity", "description": "How serious it is." },
-        "asset_guid": { "name": "Asset GUID", "description": "The asset with the problem." },
-        "tags": { "name": "Tags", "description": "Tags to add to the report." }
+        "config_entry_id": {
+          "name": "UteamUP company",
+          "description": "Needed only when several companies are connected."
+        },
+        "description": {
+          "name": "Description",
+          "description": "What is wrong."
+        },
+        "severity": {
+          "name": "Severity",
+          "description": "How serious it is."
+        },
+        "asset_guid": {
+          "name": "Asset GUID",
+          "description": "The asset with the problem."
+        },
+        "tags": {
+          "name": "Tags",
+          "description": "Tags to add to the report."
+        }
       }
     },
     "set_work_order_status": {
       "name": "Set work order status",
       "description": "Moves a work order to another status.",
       "fields": {
-        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
-        "work_order_guid": { "name": "Work order GUID", "description": "The work order to change." },
-        "status": { "name": "Status", "description": "The new status." },
-        "expected_status": { "name": "Only if currently", "description": "Change it only when the work order still has this status." }
+        "config_entry_id": {
+          "name": "UteamUP company",
+          "description": "Needed only when several companies are connected."
+        },
+        "work_order_guid": {
+          "name": "Work order GUID",
+          "description": "The work order to change."
+        },
+        "status": {
+          "name": "Status",
+          "description": "The new status."
+        },
+        "expected_status": {
+          "name": "Only if currently",
+          "description": "Change it only when the work order still has this status."
+        }
       }
     },
     "complete_work_order": {
       "name": "Complete work order",
       "description": "Completes a work order in UteamUP.",
       "fields": {
-        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
-        "work_order_guid": { "name": "Work order GUID", "description": "The work order to complete." },
-        "notes": { "name": "Notes", "description": "Saved as the completion report." }
+        "config_entry_id": {
+          "name": "UteamUP company",
+          "description": "Needed only when several companies are connected."
+        },
+        "work_order_guid": {
+          "name": "Work order GUID",
+          "description": "The work order to complete."
+        },
+        "notes": {
+          "name": "Notes",
+          "description": "Saved as the completion report."
+        }
       }
     },
     "set_asset_state": {
       "name": "Set asset operational state",
       "description": "Records that an asset is online, offline, under maintenance and so on.",
       "fields": {
-        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
-        "asset_guid": { "name": "Asset GUID", "description": "The asset." },
-        "state": { "name": "State", "description": "Its new operational state." },
-        "reason": { "name": "Reason", "description": "Why it changed." }
+        "config_entry_id": {
+          "name": "UteamUP company",
+          "description": "Needed only when several companies are connected."
+        },
+        "asset_guid": {
+          "name": "Asset GUID",
+          "description": "The asset."
+        },
+        "state": {
+          "name": "State",
+          "description": "Its new operational state."
+        },
+        "reason": {
+          "name": "Reason",
+          "description": "Why it changed."
+        }
       }
     },
     "run_pm_schedule": {
       "name": "Run preventive maintenance now",
       "description": "Creates the work order from a preventive maintenance schedule immediately.",
       "fields": {
-        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
-        "schedule_guid": { "name": "Schedule GUID", "description": "The work order template schedule to run." }
+        "config_entry_id": {
+          "name": "UteamUP company",
+          "description": "Needed only when several companies are connected."
+        },
+        "schedule_guid": {
+          "name": "Schedule GUID",
+          "description": "The work order template schedule to run."
+        }
       }
     },
     "record_meter_reading": {
       "name": "Record meter reading",
       "description": "Adds a reading to an asset meter in UteamUP. Every reading is kept permanently.",
       "fields": {
-        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
-        "asset_guid": { "name": "Asset GUID", "description": "The asset that owns the meter." },
-        "attribute_definition_guid": { "name": "Meter attribute GUID", "description": "The meter attribute on that asset's type." },
-        "value": { "name": "Value", "description": "The reading." },
-        "timestamp": { "name": "Taken at", "description": "When the reading was taken. Defaults to now." },
-        "notes": { "name": "Notes", "description": "Shown with the reading." }
+        "config_entry_id": {
+          "name": "UteamUP company",
+          "description": "Needed only when several companies are connected."
+        },
+        "asset_guid": {
+          "name": "Asset GUID",
+          "description": "The asset that owns the meter."
+        },
+        "attribute_definition_guid": {
+          "name": "Meter attribute GUID",
+          "description": "The meter attribute on that asset's type."
+        },
+        "value": {
+          "name": "Value",
+          "description": "The reading."
+        },
+        "timestamp": {
+          "name": "Taken at",
+          "description": "When the reading was taken. Defaults to now."
+        },
+        "notes": {
+          "name": "Notes",
+          "description": "Shown with the reading."
+        }
       }
     },
     "append_journal_entry": {
       "name": "Append journal entry",
       "description": "Appends a new line to an existing journal (activity log) in UteamUP.",
       "fields": {
-        "config_entry_id": { "name": "UteamUP company", "description": "Needed only when several companies are connected." },
-        "journal_guid": { "name": "Journal GUID", "description": "The journal to append to." },
-        "entry": { "name": "Entry", "description": "The log line to append." }
+        "config_entry_id": {
+          "name": "UteamUP company",
+          "description": "Needed only when several companies are connected."
+        },
+        "journal_guid": {
+          "name": "Journal GUID",
+          "description": "The journal to append to."
+        },
+        "entry": {
+          "name": "Entry",
+          "description": "The log line to append."
+        }
       }
     }
   },
@@ -282,7 +490,12 @@
       }
     },
     "severity": {
-      "options": { "low": "Low", "medium": "Medium", "high": "High", "critical": "Critical" }
+      "options": {
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "critical": "Critical"
+      }
     },
     "work_order_status": {
       "options": {

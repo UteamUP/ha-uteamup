@@ -126,6 +126,70 @@ class TelemetryMapping:
         return hashlib.sha256(self.device_key.encode()).hexdigest()
 
 
+NETWORK_METRICS = (
+    ("download", "sensor", "kB/s"),
+    ("upload", "sensor", "kB/s"),
+    ("clients", "sensor", "clients"),
+    ("internet", "binary_sensor", "0/1"),
+    ("router", "binary_sensor", "0/1"),
+)
+
+
+CLIENT_METRICS = (("download", "kB/s"), ("upload", "kB/s"), ("connected", "0/1"))
+
+
+@dataclass(frozen=True)
+class DecoClientMapping:
+    tracker_registry_id: str
+    mac_address: str
+    asset_guid: str
+    download_attribute_guid: str
+    upload_attribute_guid: str
+    connected_attribute_guid: str
+
+
+@dataclass(frozen=True)
+class NetworkTelemetryMapping:
+    """Stable Deco tracker, network sources and their corresponding public meters."""
+
+    device_guid: str
+    asset_guid: str
+    name: str
+    ha_device_id: str
+    mac_address: str
+    tracker_registry_id: str
+    download_registry_id: str
+    upload_registry_id: str
+    clients_registry_id: str
+    internet_registry_id: str
+    router_registry_id: str
+    download_attribute_guid: str
+    upload_attribute_guid: str
+    clients_attribute_guid: str
+    internet_attribute_guid: str
+    router_attribute_guid: str
+    device_key: str = field(repr=False)
+    clients: tuple[DecoClientMapping, ...] = ()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> NetworkTelemetryMapping:
+        return cls(**{key: value for key, value in data.items() if key != "clients"},
+                   clients=tuple(DecoClientMapping(**client) for client in data.get("clients", [])))
+
+    @property
+    def fingerprint(self) -> str:
+        identity = asdict(self)
+        identity.pop(CONF_DEVICE_KEY)
+        identity.pop("name")
+        if not self.clients:
+            identity.pop("clients")
+        return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+    @property
+    def credential_hash(self) -> str:
+        return hashlib.sha256(self.device_key.encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class TelemetrySettings:
     endpoint: str
@@ -133,6 +197,7 @@ class TelemetrySettings:
     environment_guid: str
     mappings: tuple[TelemetryMapping, ...]
     retry_nonce: str = ""
+    network_mappings: tuple[NetworkTelemetryMapping, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], tenant_guid: str) -> TelemetrySettings:
@@ -140,10 +205,12 @@ class TelemetrySettings:
         tenant = public_guid(data[CONF_TENANT_GUID])
         if tenant != public_guid(tenant_guid):
             raise ValueError("device_mismatch")
-        mappings = tuple(TelemetryMapping(**item) for item in data["mappings"])
-        if not mappings or len({item.device_guid for item in mappings}) != len(mappings):
+        mappings = tuple(TelemetryMapping(**item) for item in data.get("mappings", []))
+        network_mappings = tuple(NetworkTelemetryMapping.from_dict(item) for item in data.get("network_mappings", []))
+        combined = (*mappings, *network_mappings)
+        if not combined or len({item.device_guid for item in combined}) != len(combined):
             raise ValueError("device_mismatch")
-        if len({item.ha_device_id for item in mappings}) != len(mappings):
+        if len({item.ha_device_id for item in combined}) != len(combined):
             raise ValueError("device_mismatch")
         for mapping in mappings:
             for identifier in (
@@ -159,9 +226,37 @@ class TelemetrySettings:
                 or (mapping.power_basis == "estimated" and not mapping.estimate_profile.strip())
             ):
                 raise ValueError("invalid_mapping")
+        for mapping in network_mappings:
+            for identifier in (
+                mapping.device_guid, mapping.asset_guid,
+                *(getattr(mapping, f"{name}_attribute_guid") for name, _, _ in NETWORK_METRICS),
+            ):
+                public_guid(identifier)
+            normalize_mac(mapping.mac_address)
+            for registry_id in (
+                mapping.ha_device_id, mapping.tracker_registry_id,
+                *(getattr(mapping, f"{name}_registry_id") for name, _, _ in NETWORK_METRICS),
+            ):
+                UUID(registry_id)
+            if not valid_device_key(mapping.device_key):
+                raise ValueError("invalid_mapping")
+            for client in mapping.clients:
+                UUID(client.tracker_registry_id)
+                normalize_mac(client.mac_address)
+                public_guid(client.asset_guid)
+                for name, _ in CLIENT_METRICS:
+                    public_guid(getattr(client, f"{name}_attribute_guid"))
+        clients = [client for mapping in network_mappings for client in mapping.clients]
+        if (len({client.tracker_registry_id for client in clients}) != len(clients)
+                or len({client.asset_guid for client in clients}) != len(clients)):
+            raise ValueError("device_mismatch")
         return cls(
-            ingestion_endpoint(data["endpoint"]), tenant,
-            public_guid(data["environment_guid"]), mappings, str(data.get("retry_nonce", "")),
+            endpoint=ingestion_endpoint(data["endpoint"]),
+            tenant_guid=tenant,
+            environment_guid=public_guid(data["environment_guid"]),
+            mappings=mappings,
+            retry_nonce=str(data.get("retry_nonce", "")),
+            network_mappings=network_mappings,
         )
 
 
@@ -197,6 +292,14 @@ def source_belongs_to_device(
 
 def source_unit(entity: er.RegistryEntry, state: State | None) -> str | None:
     return (state.attributes.get(ATTR_UNIT_OF_MEASUREMENT) if state else None) or entity.unit_of_measurement
+
+
+def network_unit_matches(entity: er.RegistryEntry, state: State | None, domain: str, unit: str) -> bool:
+    """Deco client counts are natively unitless; traffic rates must retain kB/s."""
+    if domain == "binary_sensor":
+        return True
+    actual = source_unit(entity, state)
+    return actual == unit or (unit == "clients" and not actual)
 
 
 def compatible_meter(definition: dict[str, Any], unit: str) -> bool:
@@ -303,3 +406,101 @@ def build_mapping(
     if basis == "measured" and not measured_wiz_sources_match(hass, source, (power, energy)):
         raise ValueError("measured_source_required")
     return mapping
+
+
+def validate_deco_tracker(
+    hass: HomeAssistant, tracker: er.RegistryEntry | None, expected_mac: str,
+) -> State:
+    """Authenticate the physical Deco through its tracker attributes, not registry connections."""
+    if (
+        tracker is None or tracker.disabled or tracker.domain != "device_tracker"
+        or tracker.platform != "tplink_deco" or not tracker.device_id
+    ):
+        raise ValueError("source_missing")
+    state = hass.states.get(tracker.entity_id)
+    if state is None or state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN} or state.attributes.get("restored"):
+        raise ValueError("unavailable")
+    try:
+        matches = (
+            state.attributes.get("device_type") == "deco"
+            and normalize_mac(state.attributes.get("mac")) == expected_mac
+        )
+    except ValueError:
+        matches = False
+    if not matches:
+        raise ValueError("device_mismatch")
+    return state
+
+
+def network_source_choices(hass: HomeAssistant, device: dict[str, Any]) -> dict[str, list[str]]:
+    """Offer only entities on the Deco whose tracker has the configured physical MAC."""
+    registry = er.async_get(hass)
+    mac = normalize_mac(device.get("macAddress"))
+    choices = {"tracker_entity": [], **{f"{name}_entity": [] for name, _, _ in NETWORK_METRICS}}
+    for tracker in registry.entities.values():
+        try:
+            validate_deco_tracker(hass, tracker, mac)
+        except ValueError:
+            continue
+        choices["tracker_entity"].append(tracker.entity_id)
+        for entity in registry.entities.values():
+            if entity.disabled or entity.device_id != tracker.device_id:
+                continue
+            for name, domain, unit in NETWORK_METRICS:
+                if entity.domain != domain:
+                    continue
+                if network_unit_matches(entity, hass.states.get(entity.entity_id), domain, unit):
+                    choices[f"{name}_entity"].append(entity.entity_id)
+    return choices
+
+
+def build_network_mapping(
+    hass: HomeAssistant, device: dict[str, Any], attributes: list[dict[str, Any]],
+    inputs: dict[str, Any], previous: NetworkTelemetryMapping | None = None,
+) -> NetworkTelemetryMapping:
+    """Validate one physical Deco and all five network telemetry mappings."""
+    registry = er.async_get(hass)
+    mac = normalize_mac(device.get("macAddress"))
+    tracker = registry.async_get(inputs["tracker_entity"])
+    validate_deco_tracker(hass, tracker, mac)
+    assert tracker is not None and tracker.device_id is not None
+    entities: dict[str, er.RegistryEntry] = {}
+    for name, domain, unit in NETWORK_METRICS:
+        entity = registry.async_get(inputs[f"{name}_entity"])
+        if entity is None or entity.disabled or entity.domain != domain or entity.device_id != tracker.device_id:
+            raise ValueError("device_mismatch")
+        state = hass.states.get(entity.entity_id)
+        if state is None or state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN} or state.attributes.get("restored"):
+            raise ValueError("unavailable")
+        if domain == "binary_sensor":
+            if state.state not in {"on", "off"}:
+                raise ValueError("invalid_value")
+        elif not network_unit_matches(entity, state, domain, unit):
+            raise ValueError("unit_mismatch")
+        entities[name] = entity
+    definitions = {
+        item["attributeDefinitionGuid"]: item
+        for group in attributes for item in group.get("definitions", [])
+    }
+    for name, _, unit in NETWORK_METRICS:
+        definition = definitions.get(inputs[f"{name}_attribute_guid"]) or {}
+        if not compatible_meter(definition, unit):
+            raise ValueError("attribute_mismatch")
+    key = str(inputs.get(CONF_DEVICE_KEY, "")).strip() or (previous.device_key if previous else "")
+    if not valid_device_key(key):
+        raise ValueError("invalid_mapping")
+    return NetworkTelemetryMapping(
+        device_guid=public_guid(device["externalGuid"]),
+        asset_guid=public_guid(device["assetGuid"]),
+        name=str(device["name"]),
+        ha_device_id=tracker.device_id,
+        mac_address=mac,
+        tracker_registry_id=tracker.id,
+        **{f"{name}_registry_id": entities[name].id for name, _, _ in NETWORK_METRICS},
+        **{
+            f"{name}_attribute_guid": public_guid(inputs[f"{name}_attribute_guid"])
+            for name, _, _ in NETWORK_METRICS
+        },
+        device_key=key,
+        clients=previous.clients if previous else (),
+    )

@@ -236,6 +236,34 @@ class UteamupClient:
             result.append({**group, "definitions": enriched})
         return result
 
+    async def async_get_assets(self) -> list[dict[str, Any]]:
+        items = []
+        for page in range(1, 101):
+            result = await self._request("GET", "/api/asset", params={"page": page, "pageSize": 100})
+            batch = result["assets"]
+            items.extend(item for item in batch if item.get("isActive"))
+            if not batch or page >= result["totalPages"]:
+                return items
+        raise UteamupApiError("Too many assets to configure in one connection")
+
+    async def async_get_asset(self, asset_guid: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/asset/by-guid/{asset_guid}")
+
+    async def async_get_asset_types(self) -> list[dict[str, Any]]:
+        return await self._request("GET", "/api/asset-type")
+
+    async def async_get_asset_type(self, type_guid: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/asset-type/{type_guid}/with-inherited-attributes")
+
+    async def async_create_asset_type(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", "/api/asset-type", json_body=body)
+
+    async def async_add_asset_type_attribute(self, type_guid: str, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", f"/api/asset-type/{type_guid}/attributes", json_body=body)
+
+    async def async_patch_asset(self, asset_guid: str, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("PATCH", f"/api/asset/by-guid/{asset_guid}", json_body=body)
+
     async def async_get_open_work_orders(self) -> dict[str, Any]:
         return await self._request(
             "GET", "/api/workorder", params={"openOnly": "true", "page": 1, "pageSize": 100}

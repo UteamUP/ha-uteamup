@@ -177,6 +177,42 @@ UteamUP as a manual reading, so keep the interval coarse.
 - **Only list work orders assigned to**: a UteamUP user GUID, for a personal to-do list.
 - **Send energy readings to dedicated IoT**: optional, reviewed per-device delivery described below.
 
+## Deco clients and network meters (optional)
+
+Use an existing healthy dedicated IoT environment and a Deco router already linked to an asset
+and its MAC in UteamUP. The `tplink_deco` integration must expose the router tracker, download and
+upload sensors (kB/s), client count, internet status and router status. In **UteamUP → Configure**,
+enable telemetry, retain the existing energy selections (or select none for a network-only setup),
+then select the Deco gateway and review its five sources, matching meters and device ingestion key.
+The selected node's client count remains a node count; it is not relabelled as the whole network.
+
+The gateway also sends a bounded inventory of client trackers in the same Deco integration:
+name, MAC, local IP, connection state, reported download/upload rate and connected Deco node.
+In **UteamUP → IoT → Monitoring**, search this inventory by name, MAC or local IP. These are reported
+rates, not packet inspection or guaranteed WAN-only traffic. DNS queries, destination IP/port flows,
+traffic history and per-client cumulative byte counters are not provided by this HA integration.
+DNS/flow analysis requires another source, such as a DNS resolver's query log or a gateway flow exporter.
+
+Optionally select clients to link to existing assets. Only exact MAC matches are suggested;
+ambiguous matches require an explicit choice. Review every asset, then confirm. Confirmation creates
+or reuses the tenant custom type **Deco client telemetry**, adds missing download/upload (kB/s) and
+connected (0/1) meters, and attaches it as an additional asset type. Existing primary/additional
+types and energy meters are retained. The key and its creator need **Asset.View**, **Asset.Update**,
+**AssetType.View** and, when definitions must be created or extended, **AssetType.Create** and
+**AssetType.Update**. The server enforces these permissions; the integration does not grant them.
+Disabled or incompatible existing meters require review instead of being silently changed.
+
+An interrupted confirmation can be retried: completed type/asset changes are reused. Unselecting
+a client stops its network meter delivery; existing type assignments and historical readings remain.
+Client readings use the gateway's ingestion identity, so existing WiZ IoT devices and keys are not
+duplicated. A client's connectivity meter does not change its asset's operational state.
+
+Sources keep their HA observation timestamps. Unknown, restored or more than ten-minute-old
+observations never become zero readings. A fresh disconnected client records connected = 0 and
+has no current rate/IP. A connected client with a measured zero rate retains that zero. The sender
+runs every 60 seconds; this cannot make Deco's own polling faster. Older queued captures preserve
+their original times. Monitoring requires the matching UteamUP API and ingestion-service update.
+
 ## Dedicated energy readings (optional)
 
 This sender uses an existing dedicated UteamUP IoT environment. Enabling it does not purchase

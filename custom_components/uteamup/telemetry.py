@@ -21,9 +21,11 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, TELEMETRY_SAMPLE_SECONDS
+from .deco_clients import MAX_SOURCE_AGE, network_client_observations
 from .telemetry_config import (
-    TelemetryMapping, TelemetrySettings, device_has_mac, measured_wiz_sources_match,
-    source_belongs_to_device, source_unit,
+    NETWORK_METRICS, NetworkTelemetryMapping, TelemetryMapping, TelemetrySettings,
+    device_has_mac, measured_wiz_sources_match, network_unit_matches, source_belongs_to_device,
+    source_unit, validate_deco_tracker,
 )
 from .telemetry_queue import QueuedEnvelope, QueueStats, TelemetryQueue
 from .telemetry_transport import TelemetryTransport, retry_delay
@@ -120,6 +122,92 @@ def sample_envelope(
     )
 
 
+def sample_network_envelope(
+    hass: HomeAssistant, settings: TelemetrySettings, mapping: NetworkTelemetryMapping, now: datetime,
+) -> QueuedEnvelope:
+    """Capture router traffic, client count and online states without inferring availability."""
+    registry = er.async_get(hass)
+    tracker = registry.async_get(mapping.tracker_registry_id)
+    entities = {
+        name: registry.async_get(getattr(mapping, f"{name}_registry_id"))
+        for name, _, _ in NETWORK_METRICS
+    }
+    if tracker is None or tracker.device_id != mapping.ha_device_id or any(
+        entity is None or entity.disabled or entity.device_id != tracker.device_id
+        for entity in entities.values()
+    ):
+        raise SourceUnavailable("device_mismatch")
+    try:
+        tracker_state = validate_deco_tracker(hass, tracker, mapping.mac_address)
+    except ValueError as err:
+        raise SourceUnavailable(str(err)) from err
+    states = {name: hass.states.get(entity.entity_id) for name, entity in entities.items()}
+    if any(
+        state is None or state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN} or state.attributes.get("restored")
+        for state in states.values()
+    ):
+        raise SourceUnavailable("unavailable")
+    if now - tracker_state.last_reported > MAX_SOURCE_AGE or any(
+        now - state.last_reported > MAX_SOURCE_AGE for state in states.values()
+    ):
+        raise SourceUnavailable("stale")
+    values: dict[str, float] = {}
+    for name, domain, unit in NETWORK_METRICS:
+        entity = entities[name]
+        state = states[name]
+        if domain == "binary_sensor":
+            if state.state not in {"on", "off"}:
+                raise SourceUnavailable("invalid_value")
+            values[name] = 1.0 if state.state == "on" else 0.0
+            continue
+        if not network_unit_matches(entity, state, domain, unit):
+            raise SourceUnavailable("unit_mismatch")
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError) as err:
+            raise SourceUnavailable("invalid_value") from err
+        if not math.isfinite(value) or not 0 <= value <= 1e15:
+            raise SourceUnavailable("invalid_value")
+        values[name] = value
+    timestamp = now.isoformat()
+    event_id = str(uuid4())
+    clients, client_points = network_client_observations(hass, mapping, now)
+    payload = json.dumps({
+        "eventId": event_id,
+        "tenantGuid": settings.tenant_guid,
+        "deviceGuid": mapping.device_guid,
+        "observedAt": timestamp,
+        "metadata": {
+            "source": "homeassistant",
+            "telemetryKind": "network",
+            "trackerRegistryId": tracker.id,
+            "sourceRegistryIds": {name: entities[name].id for name, _, _ in NETWORK_METRICS},
+            "sourceStateUpdatedAt": {
+                name: states[name].last_updated.isoformat() for name, _, _ in NETWORK_METRICS
+            },
+            "networkClients": clients,
+            "clientCountScope": "selected_source",
+            "totalConnectedClients": sum(client["connected"] is True for client in clients)
+                if clients and all(client["connected"] is not None for client in clients) else None,
+        },
+        "points": [
+            {
+                "pointId": str(uuid4()),
+                "assetGuid": mapping.asset_guid,
+                "attributeDefinitionGuid": getattr(mapping, f"{name}_attribute_guid"),
+                "value": values[name],
+                "observedAt": states[name].last_reported.isoformat(),
+                "unit": unit,
+                "quality": "measured",
+            }
+            for name, _, unit in NETWORK_METRICS
+        ] + client_points,
+    }, separators=(",", ":"), allow_nan=False).encode()
+    return QueuedEnvelope(
+        event_id, settings.tenant_guid, mapping.device_guid, settings.environment_guid, mapping.fingerprint, payload,
+    )
+
+
 @dataclass
 class TelemetryHealth:
     sender: str = "starting"
@@ -139,7 +227,9 @@ class UteamupTelemetry:
         self.queue = TelemetryQueue(hass, hass.config.path(".storage", f"uteamup_telemetry_{entry.entry_id}.db"))
         self.transport = TelemetryTransport(async_get_clientsession(hass, verify_ssl=True), settings.endpoint)
         self.signal = f"{DOMAIN}_{entry.entry_id}_telemetry_health"
-        self._mappings = {item.device_guid: item for item in settings.mappings}
+        self._mappings = {
+            item.device_guid: item for item in (*settings.mappings, *settings.network_mappings)
+        }
         self._tasks: list[asyncio.Task] = []
         self._stopped = False
         self._queue_full = False
@@ -149,7 +239,8 @@ class UteamupTelemetry:
     async def async_start(self) -> None:
         try:
             await self.queue.async_configure(
-                {item.device_guid: item.credential_hash for item in self.settings.mappings}, self.settings.retry_nonce,
+                {item.device_guid: item.credential_hash for item in self._mappings.values()},
+                self.settings.retry_nonce,
             )
             await self._async_update_health()
         except (sqlite3.Error, OSError):
@@ -183,6 +274,15 @@ class UteamupTelemetry:
         for mapping in self.settings.mappings:
             try:
                 envelope = sample_envelope(self.hass, self.settings, mapping, dt_util.utcnow())
+            except SourceUnavailable as err:
+                self.health.sources[mapping.device_guid] = str(err)
+                continue
+            self.health.sources[mapping.device_guid] = "available"
+            if mapping.device_guid not in blocked:
+                overflow = not await self.queue.async_enqueue(envelope) or overflow
+        for mapping in self.settings.network_mappings:
+            try:
+                envelope = sample_network_envelope(self.hass, self.settings, mapping, dt_util.utcnow())
             except SourceUnavailable as err:
                 self.health.sources[mapping.device_guid] = str(err)
                 continue

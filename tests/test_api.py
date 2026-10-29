@@ -66,6 +66,19 @@ async def test_writes_carry_the_csrf_header(hass: HomeAssistant, aioclient_mock:
     assert body == {"report": {"description": "Seal replaced"}}
 
 
+async def test_asset_link_patch_uses_guid_tenant_and_exact_additive_payload(hass, aioclient_mock):
+    from .conftest import ASSET_GUID
+    mock_login(aioclient_mock)
+    aioclient_mock.patch(f"{BASE}/api/asset/by-guid/{ASSET_GUID}", json={"externalGuid": ASSET_GUID})
+    payload = {"assetTypeGuids": [WORK_ORDER_GUID], "expectedUpdatedAtUtc": "2026-10-29T12:00:00Z"}
+    await _client(hass).async_patch_asset(ASSET_GUID, payload)
+    _, url, body, headers = aioclient_mock.mock_calls[-1]
+    assert url.path == f"/api/asset/by-guid/{ASSET_GUID}"
+    assert body == payload
+    assert headers["X-Tenant-Guid"] == TENANT
+    assert headers["X-Requested-With"] == "XMLHttpRequest"
+
+
 async def test_a_401_logs_in_again_once(hass: HomeAssistant, aioclient_mock: AiohttpClientMocker) -> None:
     mock_login(aioclient_mock)
     aioclient_mock.get(f"{BASE}/api/stock/alerts/summary", status=401, json={"message": "expired"})

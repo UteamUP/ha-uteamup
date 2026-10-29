@@ -13,7 +13,8 @@ from homeassistant.const import STATE_UNAVAILABLE
 
 from custom_components.uteamup.const import CONF_TENANT_GUID
 from custom_components.uteamup.telemetry_config import (
-    TelemetrySettings, build_mapping, environment_settings, ingestion_endpoint, mapping_source_choices,
+    NETWORK_METRICS, TelemetrySettings, build_mapping, build_network_mapping,
+    environment_settings, ingestion_endpoint, mapping_source_choices,
 )
 
 from .conftest import ASSET_GUID, ATTRIBUTE_GUID, TENANT
@@ -83,6 +84,73 @@ def register_socket_sources(hass, config_entry):
     registry.async_remove(old_power.entity_id)
     inputs.update({"source_entity": socket.entity_id, "power_entity": power.entity_id, "power_basis": "measured", "estimate_profile": ""})
     return socket, power, energy, inputs
+
+
+NETWORK_DEVICE_GUID = "55555555-5555-4555-8555-555555555556"
+NETWORK_ASSET_GUID = "22222222-2222-4222-8222-222222222223"
+NETWORK_DEVICE = {
+    "externalGuid": NETWORK_DEVICE_GUID,
+    "name": "Main Deco",
+    "assetGuid": NETWORK_ASSET_GUID,
+    "macAddress": "A8:42:A1:D9:37:3E",
+    "isActive": True,
+}
+NETWORK_ATTRIBUTE_GUIDS = {
+    name: f"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa{index:02d}"
+    for index, (name, _, _) in enumerate(NETWORK_METRICS, start=1)
+}
+NETWORK_ATTRIBUTES = [{"assetTypeGuid": ASSET_TYPE_GUID, "definitions": [
+    {
+        "attributeDefinitionGuid": NETWORK_ATTRIBUTE_GUIDS[name],
+        "name": name,
+        "unit": unit,
+        "isMeter": True,
+        "isActive": True,
+        "allowIoTUpdates": True,
+        "dataType": 3,
+    }
+    for name, _, unit in NETWORK_METRICS
+]}]
+
+
+def register_deco_sources(hass, config_entry):
+    """A Deco tracker authenticates the router through state attributes, not registry MACs."""
+    if hass.config_entries.async_get_entry(config_entry.entry_id) is None:
+        config_entry.add_to_hass(hass)
+    physical = dr.async_get(hass).async_get_or_create(
+        config_entry_id=config_entry.entry_id,
+        identifiers={("tplink_deco", "main_deco")},
+    )
+    registry = er.async_get(hass)
+    tracker = registry.async_get_or_create(
+        "device_tracker", "tplink_deco", "main_deco", device_id=physical.id, config_entry=config_entry,
+    )
+    hass.states.async_set(tracker.entity_id, "not_home", {
+        "device_type": "deco",
+        "mac": NETWORK_DEVICE["macAddress"],
+    })
+    entities = {}
+    values = {"download": "32658.875", "upload": "740.875", "clients": "19"}
+    for name, domain, unit in NETWORK_METRICS:
+        native_unit = None if name == "clients" else unit
+        entity = registry.async_get_or_create(
+            domain,
+            "tplink_deco",
+            f"main_deco_{name}",
+            device_id=physical.id,
+            unit_of_measurement=native_unit if domain == "sensor" else None,
+        )
+        state = values.get(name, "on" if name == "internet" else "off")
+        attributes = {"unit_of_measurement": native_unit} if domain == "sensor" and native_unit else {}
+        hass.states.async_set(entity.entity_id, state, attributes)
+        entities[name] = entity
+    inputs = {
+        "tracker_entity": tracker.entity_id,
+        **{f"{name}_entity": entities[name].entity_id for name, _, _ in NETWORK_METRICS},
+        **{f"{name}_attribute_guid": NETWORK_ATTRIBUTE_GUIDS[name] for name, _, _ in NETWORK_METRICS},
+        "device_key": DEVICE_KEY,
+    }
+    return tracker, entities, inputs
 
 
 async def test_native_socket_mapping_offers_its_sources_and_needs_no_estimate_profile(hass, config_entry):
@@ -230,3 +298,35 @@ async def test_cached_settings_remain_tenant_bound(hass, config_entry):
     assert TelemetrySettings.from_dict(saved, TENANT).endpoint == ENDPOINT
     with pytest.raises(ValueError, match="device_mismatch"):
         TelemetrySettings.from_dict({**saved, CONF_TENANT_GUID: DEVICE_GUID}, TENANT)
+
+
+async def test_deco_mapping_round_trip_preserves_energy_fingerprint(hass, config_entry):
+    *_, energy_inputs = register_sources(hass, config_entry)
+    *_, network_inputs = register_deco_sources(hass, config_entry)
+    energy = build_mapping(hass, DEVICE, ATTRIBUTES, energy_inputs)
+    network = build_network_mapping(hass, NETWORK_DEVICE, NETWORK_ATTRIBUTES, network_inputs)
+    saved = {
+        **environment_settings(environment_response(), TENANT),
+        "mappings": [asdict(energy)],
+        "network_mappings": [asdict(network)],
+    }
+    restored = TelemetrySettings.from_dict(saved, TENANT)
+    assert restored.mappings[0] == energy
+    assert restored.mappings[0].fingerprint == energy.fingerprint
+    assert restored.network_mappings[0] == network
+    assert DEVICE_KEY not in repr(network)
+    assert hass.states.get(network_inputs["tracker_entity"]).state == "not_home"
+
+
+async def test_deco_mapping_rejects_wrong_mac_and_source_unit(hass, config_entry):
+    _, entities, inputs = register_deco_sources(hass, config_entry)
+    with pytest.raises(ValueError, match="device_mismatch"):
+        build_network_mapping(
+            hass,
+            {**NETWORK_DEVICE, "macAddress": "00:11:22:33:44:55"},
+            NETWORK_ATTRIBUTES,
+            inputs,
+        )
+    hass.states.async_set(entities["download"].entity_id, "32", {"unit_of_measurement": "MB/s"})
+    with pytest.raises(ValueError, match="unit_mismatch"):
+        build_network_mapping(hass, NETWORK_DEVICE, NETWORK_ATTRIBUTES, inputs)
