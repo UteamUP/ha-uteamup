@@ -159,7 +159,8 @@ class UteamupTelemetrySensor(SensorEntity):
         if self._key == "telemetry_sources_available":
             return {"sources": {
                 item.device_guid: {"name": item.name, "status": self._telemetry.health.sources.get(item.device_guid, "starting")}
-                for item in self._telemetry.settings.mappings
+                for item in (*self._telemetry.settings.mappings, *self._telemetry.settings.network_mappings,
+                             *self._telemetry.settings.measurement_mappings)
             }}
         if self._key == "telemetry_queue":
             queue = self._telemetry.health.queue

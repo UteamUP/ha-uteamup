@@ -55,6 +55,7 @@ from .const import (
 from .coordinator import UteamupConfigEntry
 from .deco_clients import deco_clients, matching_assets, prepare_client_meters
 from .services import valid_guid
+from .measurement_flow import MeasurementOptionsFlow
 from .telemetry_config import (
     NETWORK_METRICS, POWER_BASES, SOURCE_DOMAINS, DecoClientMapping, NetworkTelemetryMapping, TelemetryMapping,
     build_mapping, build_network_mapping, compatible_meter, environment_settings,
@@ -158,7 +159,7 @@ class UteamupConfigFlow(ConfigFlow, domain=DOMAIN):
         return UteamupOptionsFlow()
 
 
-class UteamupOptionsFlow(OptionsFlow):
+class UteamupOptionsFlow(MeasurementOptionsFlow, OptionsFlow):
     """Keep ordinary options compact; configure optional telemetry one device at a time."""
 
     def __init__(self) -> None:
@@ -187,7 +188,10 @@ class UteamupOptionsFlow(OptionsFlow):
             except vol.Invalid:
                 errors[CONF_ASSIGNEE_GUID] = "invalid_guid"
             else:
+                configure_measurements = user_input.pop("configure_measurements", False)
                 self._options = {**self.config_entry.options, **user_input}
+                if configure_measurements:
+                    return await self.async_step_measurement_device()
                 if self._options.get(CONF_ENABLE_TELEMETRY, False):
                     return await self.async_step_telemetry_devices()
                 return self.async_create_entry(data=self._options)
@@ -203,6 +207,7 @@ class UteamupOptionsFlow(OptionsFlow):
                     CONF_ENABLE_TELEMETRY,
                     description={"suggested_value": options.get(CONF_ENABLE_TELEMETRY, False)},
                 ): cv.boolean,
+                vol.Optional("configure_measurements", default=False): cv.boolean,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
@@ -595,7 +600,8 @@ class UteamupOptionsFlow(OptionsFlow):
                                       "position": str(len(self._client_links) + 1), "count": str(len(self._client_selected))})
 
     def _finish_telemetry(self) -> ConfigFlowResult:
-        if not self._mappings and not self._network_mappings:
+        if (not self._mappings and not self._network_mappings
+                and not self.config_entry.options.get(CONF_TELEMETRY, {}).get("measurement_mappings")):
             return self.async_show_form(step_id="telemetry_network_devices", data_schema=vol.Schema({}),
                                         errors={"base": "no_devices"})
         return self.async_create_entry(data={
@@ -604,5 +610,6 @@ class UteamupOptionsFlow(OptionsFlow):
                 **self._environment,
                 "mappings": [asdict(item) for item in self._mappings],
                 "network_mappings": [asdict(item) for item in self._network_mappings],
+                "measurement_mappings": self.config_entry.options.get(CONF_TELEMETRY, {}).get("measurement_mappings", []),
             },
         })

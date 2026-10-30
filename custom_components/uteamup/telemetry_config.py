@@ -191,6 +191,66 @@ class NetworkTelemetryMapping:
 
 
 @dataclass(frozen=True)
+class MeasurementSource:
+    """One explicitly selected numeric or binary observation, never a vendor-code guess."""
+
+    source_registry_id: str
+    attribute_guid: str
+    unit: str
+    true_state: str = ""
+    known_states: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MeasurementMapping:
+    """Reviewed physical device and independent meters on its existing UteamUP asset."""
+
+    device_guid: str
+    asset_guid: str
+    name: str
+    ha_device_id: str
+    anchor_registry_id: str
+    anchor_unique_id: str
+    anchor_platform: str
+    readings: tuple[MeasurementSource, ...]
+    device_key: str = field(repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MeasurementMapping:
+        readings = tuple(MeasurementSource(**{**item, "known_states": tuple(item.get("known_states", ()))})
+                         for item in data.get("readings", ()))
+        result = cls(**{**data, "readings": readings})
+        for identifier in (result.device_guid, result.asset_guid):
+            public_guid(identifier)
+        for identifier in (result.ha_device_id, result.anchor_registry_id):
+            UUID(identifier)
+        if (not valid_device_key(result.device_key) or not result.anchor_unique_id or not result.anchor_platform
+                or not 1 <= len(readings) <= 64
+                or len({item.source_registry_id for item in readings}) != len(readings)
+                or len({item.attribute_guid for item in readings}) != len(readings)):
+            raise ValueError("invalid_mapping")
+        for reading in readings:
+            UUID(reading.source_registry_id)
+            public_guid(reading.attribute_guid)
+            if (not isinstance(reading.unit, str) or len(reading.unit) > 50
+                    or (reading.true_state and (reading.unit != "0/1" or reading.true_state not in reading.known_states))
+                    or (reading.known_states and not reading.true_state)):
+                raise ValueError("invalid_mapping")
+        return result
+
+    @property
+    def fingerprint(self) -> str:
+        identity = asdict(self)
+        identity.pop(CONF_DEVICE_KEY)
+        identity.pop("name")
+        return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+    @property
+    def credential_hash(self) -> str:
+        return hashlib.sha256(self.device_key.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
 class TelemetrySettings:
     endpoint: str
     tenant_guid: str
@@ -198,6 +258,7 @@ class TelemetrySettings:
     mappings: tuple[TelemetryMapping, ...]
     retry_nonce: str = ""
     network_mappings: tuple[NetworkTelemetryMapping, ...] = ()
+    measurement_mappings: tuple[MeasurementMapping, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], tenant_guid: str) -> TelemetrySettings:
@@ -207,7 +268,8 @@ class TelemetrySettings:
             raise ValueError("device_mismatch")
         mappings = tuple(TelemetryMapping(**item) for item in data.get("mappings", []))
         network_mappings = tuple(NetworkTelemetryMapping.from_dict(item) for item in data.get("network_mappings", []))
-        combined = (*mappings, *network_mappings)
+        measurement_mappings = tuple(MeasurementMapping.from_dict(item) for item in data.get("measurement_mappings", []))
+        combined = (*mappings, *network_mappings, *measurement_mappings)
         if not combined or len({item.device_guid for item in combined}) != len(combined):
             raise ValueError("device_mismatch")
         if len({item.ha_device_id for item in combined}) != len(combined):
@@ -257,6 +319,7 @@ class TelemetrySettings:
             mappings=mappings,
             retry_nonce=str(data.get("retry_nonce", "")),
             network_mappings=network_mappings,
+            measurement_mappings=measurement_mappings,
         )
 
 

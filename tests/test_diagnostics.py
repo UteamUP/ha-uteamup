@@ -96,7 +96,8 @@ async def test_diagnostics_export_counts_without_account_or_record_details(hass,
     assert dict(config_entry.options) == options
 
 
-async def test_diagnostics_redact_nested_telemetry_identities_and_anonymize_sources(hass, config_entry):
+@pytest.mark.parametrize("container", [list, tuple])
+async def test_diagnostics_redact_nested_telemetry_identities_and_anonymize_sources(hass, config_entry, container):
     identity_fields = (
         "device_guid", "asset_guid", "name", "ha_device_id", "mac_address", "source_registry_id",
         "power_registry_id", "energy_registry_id", "power_attribute_guid", "energy_attribute_guid",
@@ -104,6 +105,7 @@ async def test_diagnostics_redact_nested_telemetry_identities_and_anonymize_sour
         "clients_registry_id", "internet_registry_id", "router_registry_id", "download_attribute_guid",
         "upload_attribute_guid", "clients_attribute_guid", "connected_attribute_guid", "internet_attribute_guid",
         "router_attribute_guid",
+        "anchor_registry_id", "anchor_unique_id", "attribute_guid", "true_state", "known_states",
         CONF_DEVICE_KEY,
     )
     mapping = {key: f"private-{key}" for key in identity_fields}
@@ -116,7 +118,8 @@ async def test_diagnostics_redact_nested_telemetry_identities_and_anonymize_sour
             "environment_guid": "private-environment-guid",
             "retry_nonce": "private-retry-nonce",
             "mappings": [mapping],
-            "network_mappings": [{**deepcopy(mapping), "clients": [deepcopy(mapping)]}],
+            "network_mappings": [{**deepcopy(mapping), "clients": container([deepcopy(mapping)])}],
+            "measurement_mappings": [{**deepcopy(mapping), "readings": container([deepcopy(mapping)])}],
         },
     }
     health = {
@@ -143,7 +146,7 @@ async def test_diagnostics_redact_nested_telemetry_identities_and_anonymize_sour
     assert TENANT not in serialized
     assert API_KEY not in serialized
     assert API_SECRET not in serialized
-    for mappings_key in ("mappings", "network_mappings"):
+    for mappings_key in ("mappings", "network_mappings", "measurement_mappings"):
         redacted = diagnostic["options"][CONF_TELEMETRY][mappings_key][0]
         assert all(redacted[key] == "**REDACTED**" for key in identity_fields)
         assert redacted["power_basis"] == "estimated"

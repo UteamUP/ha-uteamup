@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from collections.abc import Mapping
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_API_KEY, CONF_URL
@@ -57,6 +58,11 @@ TO_REDACT = {
     "connected_attribute_guid",
     "internet_attribute_guid",
     "router_attribute_guid",
+    "anchor_registry_id",
+    "anchor_unique_id",
+    "attribute_guid",
+    "true_state",
+    "known_states",
 }
 
 
@@ -71,12 +77,21 @@ def _counts(section: dict[str, Any] | None, keys: tuple[str, ...]) -> dict[str, 
     return counts
 
 
+def _json_containers(value: Any) -> Any:
+    """HA redaction traverses dictionaries/lists; freshly saved dataclasses contain tuples."""
+    if isinstance(value, Mapping):
+        return {key: _json_containers(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_containers(item) for item in value]
+    return value
+
+
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: UteamupConfigEntry) -> dict[str, Any]:
     data = entry.runtime_data.coordinator.data
     telemetry = entry.runtime_data.telemetry.diagnostics() if entry.runtime_data.telemetry else None
     return {
-        "entry": async_redact_data(dict(entry.data), TO_REDACT),
-        "options": async_redact_data(dict(entry.options), TO_REDACT),
+        "entry": async_redact_data(_json_containers(entry.data), TO_REDACT),
+        "options": async_redact_data(_json_containers(entry.options), TO_REDACT),
         "data": {
             "analytics": {
                 "workorders": _counts(

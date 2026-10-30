@@ -57,12 +57,14 @@
           "scan_interval": "Refresh interval (seconds)",
           "enable_webhooks": "Receive live events",
           "assignee_guid": "Only list work orders assigned to (user GUID)",
-          "enable_telemetry": "Send energy readings to dedicated IoT"
+          "enable_telemetry": "Send readings to dedicated IoT",
+          "configure_measurements": "Configure other measurements"
         },
         "data_description": {
           "enable_webhooks": "Needs the Enterprise plan and a public Home Assistant URL, such as Home Assistant Cloud. Polling continues either way.",
           "assignee_guid": "Leave empty to list every open work order.",
-          "enable_telemetry": "Optional. Review existing lights or sockets and their W/cumulative-kWh sources next. Requires an already active, healthy dedicated tenant endpoint. Turning this off stops delivery and keeps the local queue."
+          "enable_telemetry": "Optional. Review existing lights or sockets and their W/cumulative-kWh sources next. Requires an already active, healthy dedicated tenant endpoint. Turning this off stops delivery and keeps the local queue.",
+          "configure_measurements": "Add or review sensors on an existing asset: battery, tank level, vibration, counts and other readings. Keeps existing energy and Deco mappings."
         }
       },
       "telemetry_devices": {
@@ -144,6 +146,37 @@
         "data": {
           "asset_guid": "Existing UteamUP asset"
         }
+      },
+      "measurement_device": {
+        "title": "Link measurements to an existing device",
+        "description": "Choose the existing UteamUP device linked to the correct asset, then a Home Assistant entity belonging to that same physical device. This is an explicit association; names and IP addresses are not used to guess identity.",
+        "data": {
+          "device_guid": "UteamUP device",
+          "source_entity": "Home Assistant device entity",
+          "device_key": "Device ingestion key"
+        },
+        "data_description": {
+          "device_key": "Use this device’s own ingestion key. Leave blank only to keep its previously saved key."
+        }
+      },
+      "measurement_sources": {
+        "title": "Choose measurements for {device}",
+        "description": "Select numerical sensors or states from this Home Assistant device. Only actual source values are sent. Missing data is not replaced by zero. A water-check status is not a tank level or a refill warning.",
+        "data": {
+          "entities": "Measurements"
+        }
+      },
+      "measurement_meter": {
+        "title": "Match measurement {position}/{count}",
+        "description": "Source: {source}. Unit: {unit}. Choose the matching meter on the asset or an additional asset type. For a state, select which reported state means Yes (1); other known states mean No (0). Unknown and unavailable states are omitted.",
+        "data": {
+          "attribute_guid": "Asset meter",
+          "true_state": "Reported state meaning Yes"
+        }
+      },
+      "measurement_confirm": {
+        "title": "Confirm the asset connection",
+        "description": "Send {count} selected measurements from {source} to {device}, asset {asset}, through {endpoint}. This enables delivery and keeps all other mappings. Only source readings are sent; no tank volume, refill deadline or fault meaning is inferred. Change the mapping later through Configure other measurements."
       }
     },
     "error": {
@@ -167,7 +200,12 @@
       "client_setup_failed": "Could not finish linking clients. Existing settings are retained. Some types or attributes may already have been added; retry reuses them. Check the connection and whether the asset was changed by another user.",
       "ambiguous_client_type": "Several custom types are named Deco client telemetry. Resolve the duplicate in UteamUP before retrying.",
       "invalid_client_selection": "Select up to 200 registered Deco clients from this network.",
-      "client_asset_conflict": "Choose an active asset from this tenant that has not already been linked to another selected client."
+      "client_asset_conflict": "Choose an active asset from this tenant that has not already been linked to another selected client.",
+      "no_measurements": "Select between 1 and 64 measurements from this device.",
+      "no_measurement_meters": "Add an active IoT-enabled numerical meter with this exact unit to the asset’s type or an additional asset type, then reopen configuration."
+    },
+    "abort": {
+      "measurement_source_changed": "The source no longer belongs to the selected Home Assistant device. Reopen configuration and review the device connection."
     }
   },
   "entity": {

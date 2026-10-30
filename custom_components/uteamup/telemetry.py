@@ -31,6 +31,7 @@ from .telemetry_config import (
 )
 from .telemetry_queue import QueuedEnvelope, QueueStats, TelemetryQueue
 from .telemetry_transport import TelemetryTransport, retry_delay
+from .measurements import sample_measurements
 
 if TYPE_CHECKING:
     from .coordinator import UteamupConfigEntry
@@ -237,7 +238,7 @@ class UteamupTelemetry:
         self.transport = TelemetryTransport(async_get_clientsession(hass, verify_ssl=True), settings.endpoint)
         self.signal = f"{DOMAIN}_{entry.entry_id}_telemetry_health"
         self._mappings = {
-            item.device_guid: item for item in (*settings.mappings, *settings.network_mappings)
+            item.device_guid: item for item in (*settings.mappings, *settings.network_mappings, *settings.measurement_mappings)
         }
         self._tasks: list[asyncio.Task] = []
         self._stopped = False
@@ -301,6 +302,15 @@ class UteamupTelemetry:
                 self.health.sources[mapping.device_guid] = str(err)
                 continue
             self.health.sources[mapping.device_guid] = "available"
+            if mapping.device_guid not in blocked:
+                overflow = not await self.queue.async_enqueue(envelope) or overflow
+        for mapping in self.settings.measurement_mappings:
+            try:
+                envelope, partial = sample_measurements(self.hass, self.settings, mapping, dt_util.utcnow())
+            except ValueError as err:
+                self.health.sources[mapping.device_guid] = str(err)
+                continue
+            self.health.sources[mapping.device_guid] = "partial" if partial else "available"
             if mapping.device_guid not in blocked:
                 overflow = not await self.queue.async_enqueue(envelope) or overflow
         self._queue_full = overflow
