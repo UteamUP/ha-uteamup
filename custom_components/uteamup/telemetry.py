@@ -10,6 +10,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -20,7 +21,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, TELEMETRY_SAMPLE_SECONDS
+from .const import DOMAIN, TELEMETRY_KEEPALIVE_SECONDS, TELEMETRY_SAMPLE_SECONDS
 from .api import UteamupClient, UteamupError
 from .deco_clients import MAX_SOURCE_AGE, deco_clients, network_client_observations, resolved_client_mappings
 from .telemetry_config import (
@@ -38,6 +39,26 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 MAX_ESTIMATE_PARAMETER_WATTS = 1000
+CUMULATIVE_UNITS = frozenset({"Wh", "kWh"})
+
+
+def content_fingerprint(payload: bytes) -> str:
+    """What a sample says, ignoring identities, capture times and energy counters that always advance."""
+    def strip(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: strip(item) for key, item in value.items()
+                if key not in {"eventId", "pointId"} and not key.endswith(("observedAt", "ObservedAt", "UpdatedAt"))
+            }
+        if isinstance(value, list):
+            return [strip(item) for item in value]
+        return value
+
+    body = json.loads(payload)
+    for point in body.get("points", []):
+        if point.get("unit") in CUMULATIVE_UNITS:
+            point.pop("value", None)
+    return json.dumps(strip(body), sort_keys=True, separators=(",", ":"))
 
 
 def _estimate_parameters(attributes: Mapping[str, Any]) -> dict[str, float]:
@@ -233,6 +254,7 @@ class UteamupTelemetry:
         self._client_link_attempts: dict[tuple[str, str], float] = {}
         self._client_devices: list[dict[str, Any]] = []
         self._client_devices_at = 0.0
+        self._last_enqueued: dict[str, tuple[str, float]] = {}
         self.health = TelemetryHealth()
         self.queue = TelemetryQueue(hass, hass.config.path(".storage", f"uteamup_telemetry_{entry.entry_id}.db"))
         self.transport = TelemetryTransport(async_get_clientsession(hass, verify_ssl=True), settings.endpoint)
@@ -290,7 +312,7 @@ class UteamupTelemetry:
                 continue
             self.health.sources[mapping.device_guid] = "available"
             if mapping.device_guid not in blocked:
-                overflow = not await self.queue.async_enqueue(envelope) or overflow
+                overflow = not await self._async_enqueue_changed(envelope) or overflow
         for mapping in self.settings.network_mappings:
             try:
                 now = dt_util.utcnow()
@@ -303,7 +325,7 @@ class UteamupTelemetry:
                 continue
             self.health.sources[mapping.device_guid] = "available"
             if mapping.device_guid not in blocked:
-                overflow = not await self.queue.async_enqueue(envelope) or overflow
+                overflow = not await self._async_enqueue_changed(envelope) or overflow
         for mapping in self.settings.measurement_mappings:
             try:
                 envelope, partial = sample_measurements(self.hass, self.settings, mapping, dt_util.utcnow())
@@ -312,9 +334,21 @@ class UteamupTelemetry:
                 continue
             self.health.sources[mapping.device_guid] = "partial" if partial else "available"
             if mapping.device_guid not in blocked:
-                overflow = not await self.queue.async_enqueue(envelope) or overflow
+                overflow = not await self._async_enqueue_changed(envelope) or overflow
         self._queue_full = overflow
         await self._async_update_health()
+
+    async def _async_enqueue_changed(self, envelope: QueuedEnvelope) -> bool:
+        """Repeat an unchanged sample only as a keepalive: identical minutes spend the tenant's daily quota."""
+        fingerprint = content_fingerprint(envelope.payload)
+        previous = self._last_enqueued.get(envelope.device_guid)
+        now = monotonic()
+        if previous and previous[0] == fingerprint and now - previous[1] < TELEMETRY_KEEPALIVE_SECONDS:
+            return True
+        if not await self.queue.async_enqueue(envelope):
+            return False
+        self._last_enqueued[envelope.device_guid] = (fingerprint, now)
+        return True
 
     async def _async_resolve_clients(self, mapping: NetworkTelemetryMapping, now: datetime) -> NetworkTelemetryMapping:
         if self._client is None:

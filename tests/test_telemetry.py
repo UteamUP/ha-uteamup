@@ -15,7 +15,9 @@ from homeassistant.util import dt as dt_util
 from custom_components.uteamup.const import CONF_ENABLE_TELEMETRY, CONF_ENABLE_WEBHOOKS, CONF_TELEMETRY
 from custom_components.uteamup.coordinator import UteamupData, UteamupRuntimeData
 from custom_components.uteamup.diagnostics import async_get_config_entry_diagnostics
-from custom_components.uteamup.telemetry import SourceUnavailable, UteamupTelemetry, sample_envelope, sample_network_envelope
+from custom_components.uteamup.telemetry import (
+    SourceUnavailable, UteamupTelemetry, content_fingerprint, sample_envelope, sample_network_envelope,
+)
 from custom_components.uteamup.telemetry_config import (
     TelemetrySettings, build_mapping, build_network_mapping, environment_settings,
 )
@@ -194,6 +196,60 @@ async def test_auth_block_stops_new_capture_until_key_rotation(hass, config_entr
     rotated = replace(settings.mappings[0], device_key="rotated-device-key")
     await telemetry.queue.async_configure({DEVICE_GUID: rotated.credential_hash}, "")
     assert await telemetry.queue.async_next(dt_util.utcnow().timestamp()) is not None
+
+
+def _network_body(event, at, kwh, watts, connected):
+    return json.dumps({
+        "eventId": event, "observedAt": at,
+        "metadata": {
+            "sourceStateUpdatedAt": {"wan": at},
+            "networkClients": [{"macAddress": "aa:bb", "connected": connected, "sourceObservedAt": at}],
+        },
+        "points": [
+            {"pointId": event + "-e", "unit": "kWh", "value": kwh, "observedAt": at},
+            {"pointId": event + "-p", "unit": "W", "value": watts, "observedAt": at},
+        ],
+    }).encode()
+
+
+def test_fingerprint_ignores_identity_times_and_energy_counters_but_not_real_changes():
+    first = content_fingerprint(_network_body("a", "t1", 1.0, 5.0, True))
+    assert content_fingerprint(_network_body("b", "t2", 1.1, 5.0, True)) == first
+    assert content_fingerprint(_network_body("b", "t2", 1.1, 6.0, True)) != first
+    assert content_fingerprint(_network_body("b", "t2", 1.1, 5.0, False)) != first
+
+
+async def test_unchanged_samples_are_queued_only_as_keepalive(hass, config_entry):
+    settings, *_ = configured(hass, config_entry)
+    telemetry = UteamupTelemetry(hass, config_entry, settings)
+    with patch("custom_components.uteamup.telemetry.monotonic", side_effect=[1000.0, 1060.0, 1299.0, 1300.0]):
+        for _ in range(4):
+            await telemetry.async_sample_once()
+    assert (await telemetry.queue.async_stats()).pending == 2
+    assert telemetry.health.sources[DEVICE_GUID] == "available"
+
+
+async def test_power_change_is_queued_but_advancing_energy_waits_for_keepalive(hass, config_entry):
+    settings, _, _, power, energy = configured(hass, config_entry)
+    telemetry = UteamupTelemetry(hass, config_entry, settings)
+    with patch("custom_components.uteamup.telemetry.monotonic", return_value=1000.0):
+        await telemetry.async_sample_once()
+        hass.states.async_set(energy.entity_id, "1.3", dict(hass.states.get(energy.entity_id).attributes))
+        await telemetry.async_sample_once()
+        assert (await telemetry.queue.async_stats()).pending == 1
+        hass.states.async_set(power.entity_id, "0.5", dict(hass.states.get(power.entity_id).attributes))
+        await telemetry.async_sample_once()
+    assert (await telemetry.queue.async_stats()).pending == 2
+
+
+async def test_dropped_sample_is_retried_instead_of_suppressed(hass, config_entry):
+    settings, *_ = configured(hass, config_entry)
+    telemetry = UteamupTelemetry(hass, config_entry, settings)
+    with patch("custom_components.uteamup.telemetry.monotonic", return_value=1000.0):
+        with patch.object(telemetry.queue, "async_enqueue", AsyncMock(return_value=False)):
+            await telemetry.async_sample_once()
+        await telemetry.async_sample_once()
+    assert (await telemetry.queue.async_stats()).pending == 1
 
 
 async def test_unload_stops_tasks_and_retains_queue(hass, config_entry):
