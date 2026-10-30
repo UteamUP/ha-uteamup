@@ -86,6 +86,16 @@ def device_has_mac(device: dr.DeviceEntry | None, expected_mac: str) -> bool:
     return False
 
 
+def device_reference_matches(hass: HomeAssistant, stored_id: str | None, current_id: str | None) -> bool:
+    """Follow only HA's recorded split of a previously shared device identity."""
+    if not stored_id or not current_id:
+        return False
+    if stored_id == current_id:
+        return True
+    current = dr.async_get(hass).async_get(current_id)
+    return current is not None and getattr(current, "composite_device_id", None) == stored_id
+
+
 def valid_device_key(value: str) -> bool:
     """Device keys are printable ASCII tokens, never arbitrary header content."""
     return 0 < len(value) <= 512 and all(32 < ord(character) < 127 for character in value)
@@ -341,7 +351,7 @@ def source_belongs_to_device(
     if state is None:
         return False
     attributes = state.attributes
-    if attributes.get("source_device_id") == device_id:
+    if device_reference_matches(hass, attributes.get("source_device_id"), device_id):
         return True
     if attributes.get("source_entity_registry_id") == source_id:
         return True

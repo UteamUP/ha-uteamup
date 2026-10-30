@@ -25,7 +25,7 @@ from .api import UteamupClient, UteamupError
 from .deco_clients import MAX_SOURCE_AGE, deco_clients, network_client_observations, resolved_client_mappings
 from .telemetry_config import (
     NETWORK_METRICS, NetworkTelemetryMapping, TelemetryMapping, TelemetrySettings,
-    device_has_mac, measured_wiz_sources_match, network_unit_matches, source_belongs_to_device,
+    device_has_mac, device_reference_matches, measured_wiz_sources_match, network_unit_matches, source_belongs_to_device,
     source_unit, validate_deco_tracker,
     normalize_mac,
 )
@@ -70,9 +70,9 @@ def sample_envelope(
     energy = registry.async_get(mapping.energy_registry_id)
     if any(item is None or item.disabled for item in (source, power, energy)):
         raise SourceUnavailable("source_missing")
-    if source.device_id != mapping.ha_device_id:
+    if not device_reference_matches(hass, mapping.ha_device_id, source.device_id):
         raise SourceUnavailable("device_mismatch")
-    physical = dr.async_get(hass).async_get(mapping.ha_device_id)
+    physical = dr.async_get(hass).async_get(source.device_id)
     if not device_has_mac(physical, mapping.mac_address):
         raise SourceUnavailable("device_mismatch")
     states = [hass.states.get(item.entity_id) for item in (source, power, energy)]
@@ -87,7 +87,7 @@ def sample_envelope(
     for entity, state, unit in ((power, states[1], "W"), (energy, states[2], "kWh")):
         if source_unit(entity, state) != unit:
             raise SourceUnavailable("unit_mismatch")
-        if not source_belongs_to_device(hass, entity.entity_id, mapping.ha_device_id, source.id):
+        if not source_belongs_to_device(hass, entity.entity_id, source.device_id, source.id):
             raise SourceUnavailable("device_mismatch")
         profile = state.attributes.get("estimate_profile")
         if mapping.power_basis == "estimated" and profile and profile != mapping.estimate_profile:
