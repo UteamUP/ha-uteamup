@@ -111,3 +111,43 @@ async def test_saved_mapping_rejects_duplicate_or_foreign_tenant(hass, config_en
         TelemetrySettings.from_dict(saved, ASSET_GUID)
     with pytest.raises(ValueError, match="invalid_mapping"):
         MeasurementMapping.from_dict(asdict(replace(mapping, readings=(mapping.readings[0], mapping.readings[0]))))
+
+
+@pytest.mark.parametrize("state,expected", [("cleaning", [1, 0]), ("error", [0, 1]), ("docked", [0, 0])])
+async def test_vacuum_exports_independent_cleaning_and_fault_conditions(hass, config_entry, state, expected):
+    settings, mapping, anchor, *_ = configured(hass, config_entry)
+    definition = {"attributeDefinitionGuid": ATTRIBUTE_GUID, "isMeter": True, "isActive": True,
+                  "allowIoTUpdates": True, "dataType": 3, "unit": "0/1"}
+    cleaning = build_measurement_source(hass, anchor, definition, "cleaning")
+    fault = build_measurement_source(hass, anchor, {**definition, "attributeDefinitionGuid": ENERGY_GUID}, "error")
+    mapping = MeasurementMapping.from_dict(asdict(replace(mapping, readings=(cleaning, fault))))
+    hass.states.async_set(anchor.entity_id, state)
+    event, partial = sample_measurements(hass, settings, mapping, dt_util.utcnow())
+    points = json.loads(event.payload)["points"]
+    assert not partial
+    assert [point["value"] for point in points] == expected
+    assert [point["attributeDefinitionGuid"] for point in points] == [ATTRIBUTE_GUID, ENERGY_GUID]
+    assert all(point["metadata"]["sourceRegistryId"] == anchor.id for point in points)
+
+
+@pytest.mark.parametrize("state", ["unknown", "unavailable", "vendor-unknown-state"])
+async def test_unavailable_multi_condition_vacuum_never_exports_false_recovery(hass, config_entry, state):
+    settings, mapping, anchor, *_ = configured(hass, config_entry)
+    definition = {"attributeDefinitionGuid": ATTRIBUTE_GUID, "isMeter": True, "isActive": True,
+                  "allowIoTUpdates": True, "dataType": 3, "unit": "0/1"}
+    cleaning = build_measurement_source(hass, anchor, definition, "cleaning")
+    fault = replace(cleaning, attribute_guid=ENERGY_GUID, true_state="error")
+    mapping = replace(mapping, readings=(cleaning, fault))
+    hass.states.async_set(anchor.entity_id, state)
+    with pytest.raises(ValueError, match="unavailable"):
+        sample_measurements(hass, settings, mapping, dt_util.utcnow())
+
+
+async def test_multi_condition_mapping_rejects_duplicate_target_or_condition(hass, config_entry):
+    _, mapping, anchor, *_ = configured(hass, config_entry)
+    definition = {"attributeDefinitionGuid": ATTRIBUTE_GUID, "isMeter": True, "isActive": True,
+                  "allowIoTUpdates": True, "dataType": 3, "unit": "0/1"}
+    cleaning = build_measurement_source(hass, anchor, definition, "cleaning")
+    for duplicate in (replace(cleaning, true_state="error"), replace(cleaning, attribute_guid=ENERGY_GUID)):
+        with pytest.raises(ValueError, match="invalid_mapping"):
+            MeasurementMapping.from_dict(asdict(replace(mapping, readings=(cleaning, duplicate))))

@@ -226,7 +226,7 @@ class MeasurementMapping:
             UUID(identifier)
         if (not valid_device_key(result.device_key) or not result.anchor_unique_id or not result.anchor_platform
                 or not 1 <= len(readings) <= 64
-                or len({item.source_registry_id for item in readings}) != len(readings)
+                or len({(item.source_registry_id, item.true_state) for item in readings}) != len(readings)
                 or len({item.attribute_guid for item in readings}) != len(readings)):
             raise ValueError("invalid_mapping")
         for reading in readings:

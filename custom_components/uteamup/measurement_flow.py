@@ -5,7 +5,7 @@ from dataclasses import asdict
 import voluptuous as vol
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.selector import (
-    EntitySelector, EntitySelectorConfig, SelectSelector, SelectSelectorConfig,
+    BooleanSelector, EntitySelector, EntitySelectorConfig, SelectSelector, SelectSelectorConfig,
     TextSelector, TextSelectorConfig, TextSelectorType,
 )
 
@@ -72,9 +72,16 @@ class MeasurementOptionsFlow:
             elif any(item not in available for item in selected):
                 errors["base"] = "source_missing"
             else:
-                self._measurement_selected = [available[item].id for item in selected]
-                self._measurement_readings = []
-                return await self.async_step_measurement_meter()
+                # Keep every previously reviewed condition when the device is edited.
+                previous = self._measurement_previous.get("readings", [])
+                self._measurement_selected = [available[item].id for item in selected
+                    for _ in range(max(1, sum(reading["source_registry_id"] == available[item].id
+                                              for reading in previous)))]
+                if len(self._measurement_selected) > 64:
+                    errors["base"] = "no_measurements"
+                else:
+                    self._measurement_readings = []
+                    return await self.async_step_measurement_meter()
         previous = {item["source_registry_id"] for item in self._measurement_previous.get("readings", [])}
         return self.async_show_form(step_id="measurement_sources", errors=errors, data_schema=vol.Schema({
             vol.Required("entities", default=[item.entity_id for item in choices if item.id in previous]): EntitySelector(
@@ -96,8 +103,14 @@ class MeasurementOptionsFlow:
             try:
                 definition = definitions[user_input["attribute_guid"]]
                 reading = build_measurement_source(self.hass, entity, definition, user_input.get("true_state", ""))
-                if any(item.attribute_guid == reading.attribute_guid for item in self._measurement_readings):
+                if any(item.attribute_guid == reading.attribute_guid or
+                       (item.source_registry_id == reading.source_registry_id and item.true_state == reading.true_state)
+                       for item in self._measurement_readings):
                     raise ValueError("attribute_mismatch")
+                if user_input.get("add_condition"):
+                    if not states or len(self._measurement_selected) >= 64:
+                        raise ValueError("attribute_mismatch")
+                    self._measurement_selected.insert(len(self._measurement_readings) + 1, entity.id)
                 self._measurement_readings.append(reading)
                 if len(self._measurement_readings) < len(self._measurement_selected):
                     return await self.async_step_measurement_meter()
@@ -106,14 +119,18 @@ class MeasurementOptionsFlow:
                 errors["base"] = "attribute_mismatch"
         if not definitions:
             errors.setdefault("base", "no_measurement_meters")
-        previous = next((item for item in self._measurement_previous.get("readings", [])
-                         if item["source_registry_id"] == entity.id), {})
+        completed = [item for item in self._measurement_readings if item.source_registry_id == entity.id]
+        previous_readings = [item for item in self._measurement_previous.get("readings", [])
+                             if item["source_registry_id"] == entity.id]
+        previous = previous_readings[len(completed)] if len(completed) < len(previous_readings) else {}
         fields = {vol.Required("attribute_guid", description={"suggested_value": previous.get("attribute_guid")}):
                   SelectSelector(SelectSelectorConfig(options=[{"value": guid, "label": item["name"]}
                                                               for guid, item in definitions.items()], mode="dropdown"))}
         if states:
             fields[vol.Required("true_state", description={"suggested_value": previous.get("true_state", "on" if "on" in states else None)})] = (
                 SelectSelector(SelectSelectorConfig(options=list(states), mode="dropdown")))
+            if len(self._measurement_selected) < 64 and len(completed) + 1 < len(states):
+                fields[vol.Optional("add_condition", default=False)] = BooleanSelector()
         return self.async_show_form(step_id="measurement_meter", errors=errors, data_schema=vol.Schema(fields),
                                     description_placeholders={"source": state.name if state else entity.entity_id,
                                                               "unit": unit or "—",

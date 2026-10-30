@@ -171,7 +171,8 @@
         "description": "Source: {source}. Unit: {unit}. Choose the matching meter on the asset or an additional asset type. For a state, select which reported state means Yes (1); other known states mean No (0). Unknown and unavailable states are omitted.",
         "data": {
           "attribute_guid": "Asset meter",
-          "true_state": "Reported state meaning Yes"
+          "true_state": "Reported state meaning Yes",
+          "add_condition": "Add another condition from this source"
         }
       },
       "measurement_confirm": {
