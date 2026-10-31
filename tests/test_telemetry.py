@@ -222,11 +222,21 @@ def test_fingerprint_ignores_identity_times_and_energy_counters_but_not_real_cha
 async def test_unchanged_samples_are_queued_only_as_keepalive(hass, config_entry):
     settings, *_ = configured(hass, config_entry)
     telemetry = UteamupTelemetry(hass, config_entry, settings)
-    with patch("custom_components.uteamup.telemetry.monotonic", side_effect=[1000.0, 1060.0, 1299.0, 1300.0]):
+    with patch("custom_components.uteamup.telemetry.monotonic", side_effect=[1000.0, 1060.0, 1599.0, 1600.0]):
         for _ in range(4):
             await telemetry.async_sample_once()
     assert (await telemetry.queue.async_stats()).pending == 2
     assert telemetry.health.sources[DEVICE_GUID] == "available"
+
+
+async def test_unchanged_network_samples_keep_the_shorter_client_keepalive(hass, config_entry):
+    settings, *_ = network_configured(hass, config_entry)
+    telemetry = UteamupTelemetry(hass, config_entry, settings)
+    with patch("custom_components.uteamup.telemetry.monotonic", side_effect=[1000.0, 1299.0, 1300.0]):
+        for _ in range(3):
+            await telemetry.async_sample_once()
+    assert telemetry.health.sources[NETWORK_DEVICE_GUID] == "available"
+    assert (await telemetry.queue.async_stats()).pending == 2
 
 
 async def test_power_change_is_queued_but_advancing_energy_waits_for_keepalive(hass, config_entry):

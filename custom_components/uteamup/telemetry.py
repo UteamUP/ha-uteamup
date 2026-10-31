@@ -21,7 +21,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, TELEMETRY_KEEPALIVE_SECONDS, TELEMETRY_SAMPLE_SECONDS
+from .const import DOMAIN, TELEMETRY_KEEPALIVE_SECONDS, TELEMETRY_NETWORK_KEEPALIVE_SECONDS, TELEMETRY_SAMPLE_SECONDS
 from .api import UteamupClient, UteamupError
 from .deco_clients import MAX_SOURCE_AGE, deco_clients, network_client_observations, resolved_client_mappings
 from .telemetry_config import (
@@ -255,6 +255,7 @@ class UteamupTelemetry:
         self._client_devices: list[dict[str, Any]] = []
         self._client_devices_at = 0.0
         self._last_enqueued: dict[str, tuple[str, float]] = {}
+        self._network_devices = {item.device_guid for item in settings.network_mappings}
         self.health = TelemetryHealth()
         self.queue = TelemetryQueue(hass, hass.config.path(".storage", f"uteamup_telemetry_{entry.entry_id}.db"))
         self.transport = TelemetryTransport(async_get_clientsession(hass, verify_ssl=True), settings.endpoint)
@@ -339,11 +340,16 @@ class UteamupTelemetry:
         await self._async_update_health()
 
     async def _async_enqueue_changed(self, envelope: QueuedEnvelope) -> bool:
-        """Repeat an unchanged sample only as a keepalive: identical minutes spend the tenant's daily quota."""
+        """Repeat an unchanged sample only as a keepalive: identical minutes spend the tenant's daily quota.
+
+        Network envelopes keep the shorter interval because UteamUP marks a client list stale after ten minutes.
+        """
         fingerprint = content_fingerprint(envelope.payload)
         previous = self._last_enqueued.get(envelope.device_guid)
         now = monotonic()
-        if previous and previous[0] == fingerprint and now - previous[1] < TELEMETRY_KEEPALIVE_SECONDS:
+        keepalive = (TELEMETRY_NETWORK_KEEPALIVE_SECONDS if envelope.device_guid in self._network_devices
+                     else TELEMETRY_KEEPALIVE_SECONDS)
+        if previous and previous[0] == fingerprint and now - previous[1] < keepalive:
             return True
         if not await self.queue.async_enqueue(envelope):
             return False
