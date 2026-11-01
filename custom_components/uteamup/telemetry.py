@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -258,7 +259,10 @@ class UteamupTelemetry:
         self._network_devices = {item.device_guid for item in settings.network_mappings}
         self.health = TelemetryHealth()
         self.queue = TelemetryQueue(hass, hass.config.path(".storage", f"uteamup_telemetry_{entry.entry_id}.db"))
-        self.transport = TelemetryTransport(async_get_clientsession(hass, verify_ssl=True), settings.endpoint)
+        self.transport = TelemetryTransport(async_get_clientsession(hass, verify_ssl=True), settings.endpoint,
+                                            edge_bridge_endpoint=settings.edge_bridge_endpoint,
+                                            edge_bridge_token=settings.edge_bridge_token,
+                                            edge_bridge_devices=settings.edge_bridge_devices)
         self.signal = f"{DOMAIN}_{entry.entry_id}_telemetry_health"
         self._mappings = {
             item.device_guid: item for item in (*settings.mappings, *settings.network_mappings, *settings.measurement_mappings)
@@ -272,7 +276,9 @@ class UteamupTelemetry:
     async def async_start(self) -> None:
         try:
             await self.queue.async_configure(
-                {item.device_guid: item.credential_hash for item in self._mappings.values()},
+                {item.device_guid: hashlib.sha256(self.settings.edge_bridge_token.encode()).hexdigest()
+                 if item.device_guid in self.settings.edge_bridge_devices else item.credential_hash
+                 for item in self._mappings.values()},
                 self.settings.retry_nonce,
             )
             await self._async_update_health()

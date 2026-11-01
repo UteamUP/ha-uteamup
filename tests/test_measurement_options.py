@@ -5,12 +5,12 @@ from unittest.mock import patch
 
 import pytest
 from homeassistant.const import CONF_SCAN_INTERVAL
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 
 from custom_components.uteamup.const import CONF_ENABLE_TELEMETRY, CONF_ENABLE_WEBHOOKS, CONF_TELEMETRY
 from custom_components.uteamup.measurements import build_measurement_source
 from .conftest import ASSET_GUID, BASE, TENANT, mock_login
-from .test_measurements import configured
+from .test_measurements import MATTER_DEFINITIONS, configured, configured_matter
 from .test_telemetry_config import (DEVICE, DEVICE_KEY, ASSET_TYPE_GUID, ENVIRONMENT_GUID, ATTRIBUTES,
                                    ATTRIBUTE_GUID, ENERGY_GUID,
                                    environment_response, register_sources)
@@ -115,3 +115,76 @@ async def test_add_fault_condition_and_reopen_keeps_both_vacuum_outputs(hass, co
         assert [(item["source_registry_id"], item["attribute_guid"], item["true_state"]) for item in readings] == [
             (anchor.id, ATTRIBUTE_GUID, "cleaning"), (anchor.id, ENERGY_GUID, "error"),
         ]
+
+
+async def test_matter_light_flow_reviews_each_attribute_and_retains_previous_readings(hass, config_entry, aioclient_mock):
+    settings, mapping, light = configured_matter(hass, config_entry)
+    hass.config_entries.async_update_entry(config_entry, options={CONF_TELEMETRY: asdict(settings)})
+    mock_login(aioclient_mock)
+    aioclient_mock.get(f"{BASE}/api/iot/environment", json=environment_response())
+    aioclient_mock.get(f"{BASE}/api/iot/devices", json={"items": [{**DEVICE, "macAddress": ""}], "totalItems": 1})
+    aioclient_mock.get(f"{BASE}/api/asset/by-guid/{ASSET_GUID}/effective-attribute-definitions",
+                       json=[{"assetTypeGuid": ASSET_TYPE_GUID, "definitions": MATTER_DEFINITIONS}])
+    aioclient_mock.get(f"{BASE}/api/asset-type/{ASSET_TYPE_GUID}/with-inherited-attributes",
+                       json={"isActive": True, "attributeDefinitions": MATTER_DEFINITIONS})
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        CONF_SCAN_INTERVAL: 180, CONF_ENABLE_WEBHOOKS: False, CONF_ENABLE_TELEMETRY: True,
+        "configure_measurements": True,
+    })
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        "device_guid": DEVICE["externalGuid"], "source_entity": light.entity_id,
+    })
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"entities": [light.entity_id]})
+    for index, reading in enumerate(mapping.readings):
+        assert result["step_id"] == "measurement_kind"
+        assert DEVICE_KEY not in str(renderable(result))
+        if index == 0:
+            with pytest.raises(InvalidData):
+                await hass.config_entries.options.async_configure(result["flow_id"], {"source_attribute": "raw_private_data"})
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {"source_attribute": reading.source_attribute})
+        assert result["step_id"] == "measurement_meter"
+        assert result["description_placeholders"]["unit"] == reading.unit
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {
+            "attribute_guid": reading.attribute_guid, **({"true_state": "on"} if index == 0 else {}),
+        })
+    assert result["step_id"] == "measurement_confirm"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    restored = config_entry.options[CONF_TELEMETRY]["measurement_mappings"][0]
+    assert restored["readings"] == asdict(mapping)["readings"]
+
+
+async def test_new_matter_light_can_add_state_and_brightness_in_one_review(hass, config_entry, aioclient_mock):
+    settings, _, light = configured_matter(hass, config_entry)
+    hass.config_entries.async_update_entry(config_entry, options={CONF_TELEMETRY: asdict(replace(settings, measurement_mappings=()))})
+    mock_login(aioclient_mock)
+    aioclient_mock.get(f"{BASE}/api/iot/environment", json=environment_response())
+    aioclient_mock.get(f"{BASE}/api/iot/devices", json={"items": [DEVICE], "totalItems": 1})
+    aioclient_mock.get(f"{BASE}/api/asset/by-guid/{ASSET_GUID}/effective-attribute-definitions",
+                       json=[{"assetTypeGuid": ASSET_TYPE_GUID, "definitions": MATTER_DEFINITIONS}])
+    aioclient_mock.get(f"{BASE}/api/asset-type/{ASSET_TYPE_GUID}/with-inherited-attributes",
+                       json={"isActive": True, "attributeDefinitions": MATTER_DEFINITIONS})
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        CONF_SCAN_INTERVAL: 180, CONF_ENABLE_WEBHOOKS: False, CONF_ENABLE_TELEMETRY: True,
+        "configure_measurements": True,
+    })
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        "device_guid": DEVICE["externalGuid"], "source_entity": light.entity_id, "device_key": DEVICE_KEY,
+    })
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"entities": [light.entity_id]})
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"source_attribute": "state"})
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        "attribute_guid": MATTER_DEFINITIONS[0]["attributeDefinitionGuid"], "true_state": "on", "add_condition": True,
+    })
+    assert result["step_id"] == "measurement_kind"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"source_attribute": "brightness"})
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        "attribute_guid": MATTER_DEFINITIONS[2]["attributeDefinitionGuid"],
+    })
+    assert result["step_id"] == "measurement_confirm"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    readings = config_entry.options[CONF_TELEMETRY]["measurement_mappings"][0]["readings"]
+    assert [reading["source_attribute"] for reading in readings] == ["state", "brightness"]

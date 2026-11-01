@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from ipaddress import IPv4Address, IPv4Network
 from dataclasses import asdict, dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
@@ -13,7 +14,7 @@ from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, STATE_UNAVAILABLE, STA
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from .const import CONF_DEVICE_KEY, CONF_TENANT_GUID
+from .const import CONF_DEVICE_KEY, CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN, CONF_TENANT_GUID
 
 SOURCE_DOMAINS = ("light", "switch")
 POWER_BASES = ("estimated", "measured")
@@ -63,6 +64,21 @@ def environment_settings(response: dict[str, Any], tenant_guid: str) -> dict[str
         "environment_guid": public_guid(environment.get("environmentGuid")),
         CONF_TENANT_GUID: public_guid(tenant_guid),
     }
+
+
+def edge_bridge_endpoint(value: Any) -> str:
+    address = str(value).rstrip("/")
+    parsed = urlsplit(address)
+    try:
+        host = IPv4Address(parsed.hostname or "")
+        private = any(host in IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+        valid_port = parsed.port is not None and 1024 <= parsed.port <= 65535
+    except ValueError as error:
+        raise ValueError("invalid_mapping") from error
+    if (not private or not valid_port or parsed.scheme not in {"http", "https"} or parsed.username or parsed.password
+            or parsed.path or parsed.query or parsed.fragment or any(character.isspace() for character in address)):
+        raise ValueError("invalid_mapping")
+    return address
 
 
 def normalize_mac(value: Any) -> str:
@@ -209,6 +225,7 @@ class MeasurementSource:
     unit: str
     true_state: str = ""
     known_states: tuple[str, ...] = ()
+    source_attribute: str = "state"
 
 
 @dataclass(frozen=True)
@@ -226,7 +243,7 @@ class MeasurementMapping:
     device_key: str = field(repr=False)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> MeasurementMapping:
+    def from_dict(cls, data: dict[str, Any], *, require_device_key: bool = True) -> MeasurementMapping:
         readings = tuple(MeasurementSource(**{**item, "known_states": tuple(item.get("known_states", ()))})
                          for item in data.get("readings", ()))
         result = cls(**{**data, "readings": readings})
@@ -234,15 +251,21 @@ class MeasurementMapping:
             public_guid(identifier)
         for identifier in (result.ha_device_id, result.anchor_registry_id):
             UUID(identifier)
-        if (not valid_device_key(result.device_key) or not result.anchor_unique_id or not result.anchor_platform
+        if ((require_device_key and not valid_device_key(result.device_key)) or not result.anchor_unique_id or not result.anchor_platform
                 or not 1 <= len(readings) <= 64
-                or len({(item.source_registry_id, item.true_state) for item in readings}) != len(readings)
+                or len({(item.source_registry_id, item.true_state, item.source_attribute)
+                        for item in readings}) != len(readings)
                 or len({item.attribute_guid for item in readings}) != len(readings)):
             raise ValueError("invalid_mapping")
         for reading in readings:
             UUID(reading.source_registry_id)
             public_guid(reading.attribute_guid)
             if (not isinstance(reading.unit, str) or len(reading.unit) > 50
+                    or reading.source_attribute not in {"state", "availability", "brightness", "color_temp_kelvin"}
+                    or (reading.source_attribute != "state" and (reading.true_state or reading.known_states))
+                    or (reading.source_attribute == "availability" and reading.unit != "0/1")
+                    or (reading.source_attribute == "brightness" and reading.unit != "%")
+                    or (reading.source_attribute == "color_temp_kelvin" and reading.unit != "K")
                     or (reading.true_state and (reading.unit != "0/1" or reading.true_state not in reading.known_states))
                     or (reading.known_states and not reading.true_state)):
                 raise ValueError("invalid_mapping")
@@ -253,6 +276,10 @@ class MeasurementMapping:
         identity = asdict(self)
         identity.pop(CONF_DEVICE_KEY)
         identity.pop("name")
+        # Old state-only mappings must keep accepting their original durable queue.
+        for reading in identity["readings"]:
+            if reading["source_attribute"] == "state":
+                reading.pop("source_attribute")
         return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
     @property
@@ -269,6 +296,9 @@ class TelemetrySettings:
     retry_nonce: str = ""
     network_mappings: tuple[NetworkTelemetryMapping, ...] = ()
     measurement_mappings: tuple[MeasurementMapping, ...] = ()
+    edge_bridge_endpoint: str = ""
+    edge_bridge_token: str = field(default="", repr=False)
+    edge_bridge_devices: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], tenant_guid: str) -> TelemetrySettings:
@@ -276,9 +306,18 @@ class TelemetrySettings:
         tenant = public_guid(data[CONF_TENANT_GUID])
         if tenant != public_guid(tenant_guid):
             raise ValueError("device_mismatch")
+        bridge_devices = tuple(public_guid(value) for value in data.get(CONF_EDGE_BRIDGE_DEVICES, ()))
+        bridge_endpoint = str(data.get(CONF_EDGE_BRIDGE_ENDPOINT, ""))
+        bridge_token = str(data.get(CONF_EDGE_BRIDGE_TOKEN, ""))
+        if bridge_devices or bridge_endpoint or bridge_token:
+            bridge_endpoint = edge_bridge_endpoint(bridge_endpoint)
+            if (not bridge_devices or len(bridge_devices) > 1000 or len(set(bridge_devices)) != len(bridge_devices)
+                    or len(bridge_token) < 32 or not valid_device_key(bridge_token)):
+                raise ValueError("invalid_mapping")
         mappings = tuple(TelemetryMapping(**item) for item in data.get("mappings", []))
         network_mappings = tuple(NetworkTelemetryMapping.from_dict(item) for item in data.get("network_mappings", []))
-        measurement_mappings = tuple(MeasurementMapping.from_dict(item) for item in data.get("measurement_mappings", []))
+        measurement_mappings = tuple(MeasurementMapping.from_dict(item, require_device_key=item["device_guid"] not in bridge_devices)
+                                     for item in data.get("measurement_mappings", []))
         combined = (*mappings, *network_mappings, *measurement_mappings)
         if not combined or len({item.device_guid for item in combined}) != len(combined):
             raise ValueError("device_mismatch")
@@ -330,6 +369,9 @@ class TelemetrySettings:
             retry_nonce=str(data.get("retry_nonce", "")),
             network_mappings=network_mappings,
             measurement_mappings=measurement_mappings,
+            edge_bridge_endpoint=bridge_endpoint,
+            edge_bridge_token=bridge_token,
+            edge_bridge_devices=bridge_devices,
         )
 
 

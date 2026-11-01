@@ -156,6 +156,10 @@ class UteamupTelemetrySensor(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
+        if self._key in {"telemetry_sender", "telemetry_last_success"}:
+            bridged = len(self._telemetry.settings.edge_bridge_devices)
+            return {"edge_bridge_devices": bridged,
+                    "edge_bridge_acknowledgement": "collector_storage_only" if bridged else None}
         if self._key == "telemetry_sources_available":
             return {"sources": {
                 item.device_guid: {"name": item.name, "status": self._telemetry.health.sources.get(item.device_guid, "starting")}

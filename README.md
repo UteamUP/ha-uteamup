@@ -213,6 +213,29 @@ has no current rate/IP. A connected client with a measured zero rate retains tha
 runs every 60 seconds; this cannot make Deco's own polling faster. Older queued captures preserve
 their original times. Monitoring requires the matching UteamUP API and ingestion-service update.
 
+## Matter states and EdgeBridge delivery (optional)
+
+**Configure other measurements** supports Matter lights without a network MAC or power meter.
+After selecting an existing asset-bound IoT device and its physical Home Assistant entity, choose
+the reported state, availability, brightness (%) or color temperature (K). Battery sensors and
+door/window contacts use their actual sensor values. Brightness is converted from HA's 0–255
+scale to percent; missing brightness or temperature is omitted. An unavailable entity can report
+availability 0 without inventing an off state. Unknown and restored state is never reported as 0.
+The association retains the device, entity-registry ID, platform and unique ID across renames.
+
+To use **UteamUP EdgeBridge**, select **Configure EdgeBridge delivery**, review the devices,
+the collector's private LAN origin and its dedicated HA intake token. The collector must allow
+HA's exact IP and accept `/v1/intake/telemetry`. Out must have a `UteamUpTelemetry` sink with each
+device's own ingestion key and an explicit device → asset → meter route. Cloud keys for these
+devices can stay exclusively on out. Other devices retain their configured delivery route.
+
+The existing HA spool retains the original event and point IDs and observation timestamps.
+The collector acknowledges only after durable intake; that receipt is **not** confirmation of
+UPSense delivery. EdgeBridge signs and encrypts the record, and out requires an exact UPSense
+acknowledgement before recording delivery. Failed handoffs retry without direct-cloud fallback.
+EdgeBridge keeps its record-size budget and five-minute live-delivery window; stale or rejected
+records remain retained for review rather than receiving new timestamps.
+
 ## Dedicated energy readings (optional)
 
 This sender uses an existing dedicated UteamUP IoT environment. Enabling it does not purchase

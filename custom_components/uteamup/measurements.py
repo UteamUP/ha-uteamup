@@ -20,7 +20,7 @@ VACUUM_STATES = ("cleaning", "docked", "returning", "idle", "paused", "error")
 
 
 def measurement_states(hass: HomeAssistant, entity: er.RegistryEntry) -> tuple[str, ...]:
-    if entity.domain == "binary_sensor":
+    if entity.domain in {"binary_sensor", "light", "switch"}:
         return ("on", "off")
     if entity.domain == "vacuum":
         return VACUUM_STATES
@@ -34,7 +34,7 @@ def measurement_states(hass: HomeAssistant, entity: er.RegistryEntry) -> tuple[s
 def measurement_choices(hass: HomeAssistant, device_id: str) -> list[er.RegistryEntry]:
     result = []
     for entity in er.async_entries_for_device(er.async_get(hass), device_id):
-        if entity.disabled or entity.domain not in {"sensor", "binary_sensor", "vacuum"}:
+        if entity.disabled or entity.domain not in {"sensor", "binary_sensor", "vacuum", "light", "switch"}:
             continue
         state = hass.states.get(entity.entity_id)
         if measurement_states(hass, entity) or source_unit(entity, state):
@@ -42,17 +42,64 @@ def measurement_choices(hass: HomeAssistant, device_id: str) -> list[er.Registry
     return result
 
 
+def measurement_attributes(hass: HomeAssistant, entity: er.RegistryEntry) -> tuple[str, ...]:
+    """Offer explicit device health and supported light attributes without requiring a MAC."""
+    choices = ["state"]
+    if entity.platform == "matter" or entity.domain in {"light", "switch"}:
+        choices.append("availability")
+    if entity.domain == "light":
+        state = hass.states.get(entity.entity_id)
+        modes = state.attributes.get("supported_color_modes", ()) if state else ()
+        if any(mode not in {"onoff", "unknown"} for mode in modes):
+            choices.append("brightness")
+        if "color_temp" in modes:
+            choices.append("color_temp_kelvin")
+    return tuple(choices)
+
+
+def measurement_unit(hass: HomeAssistant, entity: er.RegistryEntry, source_attribute: str = "state") -> str:
+    if source_attribute == "availability":
+        return "0/1"
+    if source_attribute == "brightness":
+        return "%"
+    if source_attribute == "color_temp_kelvin":
+        return "K"
+    return "0/1" if measurement_states(hass, entity) else source_unit(entity, hass.states.get(entity.entity_id))
+
+
 def build_measurement_source(hass: HomeAssistant, entity: er.RegistryEntry, definition: dict,
-                             true_state: str = "") -> MeasurementSource:
-    states = measurement_states(hass, entity)
-    unit = "0/1" if states else source_unit(entity, hass.states.get(entity.entity_id))
+                             true_state: str = "", source_attribute: str = "state") -> MeasurementSource:
+    if source_attribute not in measurement_attributes(hass, entity):
+        raise ValueError("invalid_value")
+    states = measurement_states(hass, entity) if source_attribute == "state" else ()
+    unit = measurement_unit(hass, entity, source_attribute)
     if not unit or not compatible_meter(definition, unit):
         raise ValueError("attribute_mismatch")
     if states and true_state not in states:
         raise ValueError("invalid_value")
     if not states and true_state:
         raise ValueError("invalid_value")
-    return MeasurementSource(entity.id, definition["attributeDefinitionGuid"], unit, true_state, states)
+    return MeasurementSource(entity.id, definition["attributeDefinitionGuid"], unit, true_state, states, source_attribute)
+
+
+def _attribute_value(state, entity: er.RegistryEntry, reading: MeasurementSource) -> float:
+    if reading.source_attribute == "availability":
+        if reading.unit != "0/1" or state.state == STATE_UNKNOWN:
+            raise ValueError("unavailable")
+        return float(state.state != STATE_UNAVAILABLE)
+    if (entity.domain != "light" or reading.source_attribute not in {"brightness", "color_temp_kelvin"}
+            or state.state not in {"on", "off"}):
+        raise ValueError("invalid_value")
+    value = state.attributes.get(reading.source_attribute)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError("unavailable")
+    if reading.source_attribute == "brightness":
+        if reading.unit != "%" or not 0 <= value <= 255:
+            raise ValueError("invalid_value")
+        return value * 100 / 255
+    if reading.unit != "K" or not 0 < value <= 1e6:
+        raise ValueError("invalid_value")
+    return float(value)
 
 
 def _source_point(hass: HomeAssistant, mapping: MeasurementMapping, reading: MeasurementSource, now: datetime) -> dict:
@@ -60,9 +107,13 @@ def _source_point(hass: HomeAssistant, mapping: MeasurementMapping, reading: Mea
     if entity is None or entity.disabled or entity.device_id != mapping.ha_device_id:
         raise ValueError("device_mismatch")
     state = hass.states.get(entity.entity_id)
-    if state is None or state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN, ""} or state.attributes.get("restored"):
+    if state is None or state.state in {STATE_UNKNOWN, ""} or state.attributes.get("restored"):
         raise ValueError("unavailable")
-    if reading.known_states:
+    if reading.source_attribute != "state":
+        value = _attribute_value(state, entity, reading)
+    elif state.state == STATE_UNAVAILABLE:
+        raise ValueError("unavailable")
+    elif reading.known_states:
         if measurement_states(hass, entity) != reading.known_states or state.state not in reading.known_states:
             raise ValueError("invalid_value")
         value = float(state.state == reading.true_state)
@@ -80,7 +131,8 @@ def _source_point(hass: HomeAssistant, mapping: MeasurementMapping, reading: Mea
         "attributeDefinitionGuid": reading.attribute_guid, "value": value, "unit": reading.unit,
         "observedAt": now.isoformat(), "quality": "measured",
         "metadata": {"sourceRegistryId": entity.id, "sourceStateUpdatedAt": state.last_updated.isoformat(),
-                     "sourceReportedAt": state.last_reported.isoformat(), "observationKind": "current_state_sample"},
+                     "sourceReportedAt": state.last_reported.isoformat(), "observationKind": "current_state_sample",
+                     "sourceAttribute": reading.source_attribute},
     }
 
 
@@ -92,12 +144,16 @@ def sample_measurements(hass: HomeAssistant, settings: TelemetrySettings, mappin
             or anchor.unique_id != mapping.anchor_unique_id or anchor.platform != mapping.anchor_platform):
         raise ValueError("device_mismatch")
     anchor_state = hass.states.get(anchor.entity_id)
-    if (anchor_state is None or anchor_state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN}
+    if (anchor_state is None or anchor_state.state in {STATE_UNKNOWN, ""}
             or anchor_state.attributes.get("restored")):
         raise ValueError("unavailable")
     points, unavailable = [], []
     for reading in mapping.readings:
         try:
+            if anchor_state.state == STATE_UNAVAILABLE and not (
+                reading.source_attribute == "availability" and reading.source_registry_id == anchor.id
+            ):
+                raise ValueError("unavailable")
             points.append(_source_point(hass, mapping, reading, now))
         except ValueError as err:
             unavailable.append({"attributeDefinitionGuid": reading.attribute_guid, "reason": str(err)})

@@ -1,6 +1,7 @@
 """Only exact matching acknowledgements consume queued device readings."""
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -84,3 +85,42 @@ def test_retry_after_http_date_and_backoff_cap():
     assert 4 <= retry_delay(0, 0) <= 6
     assert retry_after_seconds("nan", now) == 0
     assert retry_after_seconds("unparseable", now) == 0
+
+
+async def test_edge_bridge_handoff_uses_separate_token_and_preserves_original_envelope():
+    _, session, event = setup_transport(overrides={"stage": "edgebridge_intake"})
+    body = {"eventId": event.event_id, "tenantGuid": TENANT, "deviceGuid": DEVICE_GUID,
+            "observedAt": "2030-01-01T00:00:00+00:00", "points": [{"value": 0, "unit": "0/1"}]}
+    event = replace(event, payload=json.dumps(body).encode())
+    transport = TelemetryTransport(session, ENDPOINT, edge_bridge_endpoint="http://192.168.68.13:41080",
+                                   edge_bridge_token="home-assistant-intake-token-1234567890",
+                                   edge_bridge_devices=(DEVICE_GUID,))
+    assert (await transport.async_send(event, "cloud-key-must-stay-on-out")).outcome == "accepted"
+    args, kwargs = session.post.call_args
+    assert args == ("http://192.168.68.13:41080/v1/intake/telemetry",)
+    assert kwargs["headers"] == {"Authorization": "Bearer home-assistant-intake-token-1234567890", "Content-Type": "application/json"}
+    assert json.loads(kwargs["data"]) == {"source": "homeassistant", "kind": "telemetry",
+                                          "observedAt": body["observedAt"], "envelope": body}
+    assert "cloud-key-must-stay-on-out" not in str(kwargs)
+    assert kwargs["allow_redirects"] is False
+
+
+@pytest.mark.parametrize("status,stage,expected", [(503, "edgebridge_intake", "retrying"),
+    (202, "cloud", "retrying"), (401, "edgebridge_intake", "authentication"),
+    (307, "edgebridge_intake", "configuration")])
+async def test_edge_bridge_failure_never_falls_back_to_cloud(status, stage, expected):
+    _, session, event = setup_transport(status=status, overrides={"stage": stage})
+    event = replace(event, payload=b'{"observedAt":"2030-01-01T00:00:00Z"}')
+    transport = TelemetryTransport(session, ENDPOINT, edge_bridge_endpoint="http://192.168.68.13:41080",
+                                   edge_bridge_token="ha-intake-test-token-1234567890123456", edge_bridge_devices=(DEVICE_GUID,))
+    assert (await transport.async_send(event, "unused-cloud-key")).outcome == expected
+    session.post.assert_called_once()
+    assert session.post.call_args.args[0].startswith("http://192.168.68.13:41080/")
+
+
+async def test_unselected_devices_retain_their_reviewed_direct_route():
+    _, session, event = setup_transport()
+    transport = TelemetryTransport(session, ENDPOINT, edge_bridge_endpoint="http://192.168.68.13:41080",
+                                   edge_bridge_token="ha-intake-test-token-1234567890123456", edge_bridge_devices=(str(uuid4()),))
+    assert (await transport.async_send(event, DEVICE_KEY)).outcome == "accepted"
+    assert session.post.call_args.args[0] == f"{ENDPOINT}/v1/telemetry/batch"

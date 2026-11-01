@@ -11,9 +11,11 @@ from homeassistant.helpers.selector import (
 
 from . import create_client
 from .api import UteamupError, UteamupForbiddenError
-from .const import CONF_ENABLE_TELEMETRY, CONF_TELEMETRY, CONF_TENANT_GUID
-from .measurements import build_measurement_source, measurement_choices, measurement_states
-from .telemetry_config import MeasurementMapping, TelemetrySettings, compatible_meter, environment_settings, source_unit
+from .const import CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_ENABLE_TELEMETRY, CONF_TELEMETRY, CONF_TENANT_GUID
+from .measurements import (
+    build_measurement_source, measurement_attributes, measurement_choices, measurement_states, measurement_unit,
+)
+from .telemetry_config import MeasurementMapping, TelemetrySettings, compatible_meter, environment_settings
 
 
 class MeasurementOptionsFlow:
@@ -57,7 +59,8 @@ class MeasurementOptionsFlow:
             vol.Required("device_guid"): SelectSelector(SelectSelectorConfig(options=[
                 {"value": guid, "label": item["name"]} for guid, item in self._devices.items()
             ], mode="dropdown", sort=True)),
-            vol.Required("source_entity"): EntitySelector(EntitySelectorConfig(domain=["vacuum", "sensor", "binary_sensor"])),
+            vol.Required("source_entity"): EntitySelector(EntitySelectorConfig(
+                domain=["vacuum", "sensor", "binary_sensor", "light", "switch"])),
             vol.Optional("device_key"): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
         }))
 
@@ -81,6 +84,7 @@ class MeasurementOptionsFlow:
                     errors["base"] = "no_measurements"
                 else:
                     self._measurement_readings = []
+                    self._measurement_attribute = None
                     return await self.async_step_measurement_meter()
         previous = {item["source_registry_id"] for item in self._measurement_previous.get("readings", [])}
         return self.async_show_form(step_id="measurement_sources", errors=errors, data_schema=vol.Schema({
@@ -88,30 +92,60 @@ class MeasurementOptionsFlow:
                 EntitySelectorConfig(include_entities=list(available), multiple=True)),
         }), description_placeholders={"device": self._measurement_device["name"]})
 
+    async def async_step_measurement_kind(self, user_input=None):
+        entity = er.async_get(self.hass).async_get(self._measurement_selected[len(self._measurement_readings)])
+        if entity is None or entity.disabled or entity.device_id != self._measurement_anchor.device_id:
+            return self.async_abort(reason="measurement_source_changed")
+        choices = measurement_attributes(self.hass, entity)
+        errors = {}
+        if user_input is not None:
+            if user_input.get("source_attribute") in choices:
+                self._measurement_attribute = user_input["source_attribute"]
+                return await self.async_step_measurement_meter()
+            errors["base"] = "invalid_mapping"
+        previous = [item for item in self._measurement_previous.get("readings", [])
+                    if item["source_registry_id"] == entity.id]
+        completed = sum(item.source_registry_id == entity.id for item in self._measurement_readings)
+        suggested = previous[completed].get("source_attribute", "state") if completed < len(previous) else "state"
+        state = self.hass.states.get(entity.entity_id)
+        return self.async_show_form(step_id="measurement_kind", errors=errors, data_schema=vol.Schema({
+            vol.Required("source_attribute", description={"suggested_value": suggested}): SelectSelector(
+                SelectSelectorConfig(options=list(choices), mode="dropdown", translation_key="measurement_attribute")),
+        }), description_placeholders={"source": state.name if state else entity.entity_id})
+
     async def async_step_measurement_meter(self, user_input=None):
         registry = er.async_get(self.hass)
         entity = registry.async_get(self._measurement_selected[len(self._measurement_readings)])
         if entity is None or entity.disabled or entity.device_id != self._measurement_anchor.device_id:
             return self.async_abort(reason="measurement_source_changed")
+        if self._measurement_attribute is None:
+            if len(measurement_attributes(self.hass, entity)) > 1:
+                return await self.async_step_measurement_kind()
+            self._measurement_attribute = "state"
         state = self.hass.states.get(entity.entity_id)
-        states = measurement_states(self.hass, entity)
-        unit = "0/1" if states else source_unit(entity, state)
+        states = measurement_states(self.hass, entity) if self._measurement_attribute == "state" else ()
+        unit = measurement_unit(self.hass, entity, self._measurement_attribute)
+        completed = [item for item in self._measurement_readings if item.source_registry_id == entity.id]
+        capacity = len(measurement_attributes(self.hass, entity)) - 1 + max(len(measurement_states(self.hass, entity)), 1)
         definitions = {item["attributeDefinitionGuid"]: item for group in self._attributes or []
                        for item in group.get("definitions", []) if compatible_meter(item, unit)}
         errors = {}
         if user_input is not None:
             try:
                 definition = definitions[user_input["attribute_guid"]]
-                reading = build_measurement_source(self.hass, entity, definition, user_input.get("true_state", ""))
+                reading = build_measurement_source(self.hass, entity, definition,
+                                                  user_input.get("true_state", ""), self._measurement_attribute)
                 if any(item.attribute_guid == reading.attribute_guid or
-                       (item.source_registry_id == reading.source_registry_id and item.true_state == reading.true_state)
+                       (item.source_registry_id == reading.source_registry_id and item.true_state == reading.true_state
+                        and item.source_attribute == reading.source_attribute)
                        for item in self._measurement_readings):
                     raise ValueError("attribute_mismatch")
                 if user_input.get("add_condition"):
-                    if not states or len(self._measurement_selected) >= 64:
+                    if len(completed) + 1 >= capacity or len(self._measurement_selected) >= 64:
                         raise ValueError("attribute_mismatch")
                     self._measurement_selected.insert(len(self._measurement_readings) + 1, entity.id)
                 self._measurement_readings.append(reading)
+                self._measurement_attribute = None
                 if len(self._measurement_readings) < len(self._measurement_selected):
                     return await self.async_step_measurement_meter()
                 return await self.async_step_measurement_confirm()
@@ -119,7 +153,6 @@ class MeasurementOptionsFlow:
                 errors["base"] = "attribute_mismatch"
         if not definitions:
             errors.setdefault("base", "no_measurement_meters")
-        completed = [item for item in self._measurement_readings if item.source_registry_id == entity.id]
         previous_readings = [item for item in self._measurement_previous.get("readings", [])
                              if item["source_registry_id"] == entity.id]
         previous = previous_readings[len(completed)] if len(completed) < len(previous_readings) else {}
@@ -129,8 +162,8 @@ class MeasurementOptionsFlow:
         if states:
             fields[vol.Required("true_state", description={"suggested_value": previous.get("true_state", "on" if "on" in states else None)})] = (
                 SelectSelector(SelectSelectorConfig(options=list(states), mode="dropdown")))
-            if len(self._measurement_selected) < 64 and len(completed) + 1 < len(states):
-                fields[vol.Optional("add_condition", default=False)] = BooleanSelector()
+        if len(self._measurement_selected) < 64 and len(completed) + 1 < capacity:
+            fields[vol.Optional("add_condition", default=False)] = BooleanSelector()
         return self.async_show_form(step_id="measurement_meter", errors=errors, data_schema=vol.Schema(fields),
                                     description_placeholders={"source": state.name if state else entity.entity_id,
                                                               "unit": unit or "—",
@@ -161,8 +194,12 @@ class MeasurementOptionsFlow:
                 errors["base"] = "cannot_connect"
             except (ValueError, KeyError, TypeError, StopIteration):
                 errors["base"] = "invalid_mapping"
+        saved = self.config_entry.options.get(CONF_TELEMETRY, {})
+        endpoint = (saved.get(CONF_EDGE_BRIDGE_ENDPOINT, self._environment["endpoint"])
+                    if device["externalGuid"] in saved.get(CONF_EDGE_BRIDGE_DEVICES, [])
+                    else self._environment["endpoint"])
         return self.async_show_form(step_id="measurement_confirm", errors=errors, data_schema=vol.Schema({}),
                                     description_placeholders={"device": device["name"], "asset": device["assetGuid"],
                                                               "source": anchor.entity_id,
                                                               "count": str(len(self._measurement_readings)),
-                                                              "endpoint": self._environment["endpoint"]})
+                                                              "endpoint": endpoint})

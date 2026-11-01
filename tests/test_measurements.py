@@ -1,7 +1,9 @@
 """Generic sensors retain actual observations, independent availability and physical identity."""
 
 from dataclasses import asdict, replace
+import hashlib
 import json
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -10,8 +12,31 @@ from homeassistant.util import dt as dt_util
 from custom_components.uteamup.measurements import build_measurement_source, measurement_choices, sample_measurements
 from custom_components.uteamup.telemetry import UteamupTelemetry
 from custom_components.uteamup.telemetry_config import MeasurementMapping, MeasurementSource, TelemetrySettings
+from custom_components.uteamup.telemetry_config import edge_bridge_endpoint
 from .conftest import ASSET_GUID, ATTRIBUTE_GUID, TENANT
 from .test_telemetry_config import DEVICE_GUID, DEVICE_KEY, ENDPOINT, ENVIRONMENT_GUID, ENERGY_GUID
+
+MATTER_DEFINITIONS = [
+    {"attributeDefinitionGuid": str(uuid5(NAMESPACE_URL, "matter-" + name)), "externalGuid": str(uuid5(NAMESPACE_URL, "matter-" + name)),
+     "name": name, "isActive": True, "isMeter": True, "allowIoTUpdates": True, "dataType": 3, "unit": unit}
+    for name, unit in (("Light is on", "0/1"), ("Available", "0/1"), ("Brightness", "%"), ("Color temperature", "K"))
+]
+
+
+def configured_matter(hass, config_entry):
+    config_entry.add_to_hass(hass)
+    physical = dr.async_get(hass).async_get_or_create(config_entry_id=config_entry.entry_id,
+                                                    identifiers={("matter", "fabric-node-1")})
+    light = er.async_get(hass).async_get_or_create("light", "matter", "fabric-node-1-light", device_id=physical.id)
+    hass.states.async_set(light.entity_id, "on", {"supported_color_modes": ["color_temp", "xy"],
+                                               "brightness": 127.5, "color_temp_kelvin": 2475})
+    readings = tuple(build_measurement_source(hass, light, definition, "on" if attribute == "state" else "", attribute)
+                     for definition, attribute in zip(MATTER_DEFINITIONS,
+                         ("state", "availability", "brightness", "color_temp_kelvin"), strict=True))
+    mapping = MeasurementMapping(DEVICE_GUID, ASSET_GUID, "IKEA light", physical.id, light.id, light.unique_id,
+                                 light.platform, readings, DEVICE_KEY)
+    settings = TelemetrySettings(ENDPOINT, TENANT, ENVIRONMENT_GUID, (), measurement_mappings=(mapping,))
+    return settings, mapping, light
 
 
 def configured(hass, config_entry):
@@ -151,3 +176,132 @@ async def test_multi_condition_mapping_rejects_duplicate_target_or_condition(has
     for duplicate in (replace(cleaning, true_state="error"), replace(cleaning, attribute_guid=ENERGY_GUID)):
         with pytest.raises(ValueError, match="invalid_mapping"):
             MeasurementMapping.from_dict(asdict(replace(mapping, readings=(cleaning, duplicate))))
+
+
+async def test_matter_light_without_mac_exports_real_state_and_attributes(hass, config_entry):
+    settings, mapping, light = configured_matter(hass, config_entry)
+    assert not dr.async_get(hass).async_get(mapping.ha_device_id).connections
+    assert light in measurement_choices(hass, mapping.ha_device_id)
+    event, partial = sample_measurements(hass, settings, mapping, dt_util.utcnow())
+    points = json.loads(event.payload)["points"]
+    assert not partial
+    assert [point["value"] for point in points] == [1, 1, 50, 2475]
+    assert [point["unit"] for point in points] == ["0/1", "0/1", "%", "K"]
+    assert all(point["assetGuid"] == ASSET_GUID and point["quality"] == "measured" for point in points)
+    assert [point["metadata"]["sourceAttribute"] for point in points] == [
+        "state", "availability", "brightness", "color_temp_kelvin",
+    ]
+    assert TelemetrySettings.from_dict(asdict(settings), TENANT) == settings
+    er.async_get(hass).async_update_entity(light.entity_id, new_entity_id="light.renamed_matter_light")
+    hass.states.async_set("light.renamed_matter_light", "on", {"brightness": 255, "color_temp_kelvin": 3000})
+    event, partial = sample_measurements(hass, settings, mapping, dt_util.utcnow())
+    assert not partial
+    assert [point["value"] for point in json.loads(event.payload)["points"]] == [1, 1, 100, 3000]
+
+
+async def test_matter_unavailable_is_health_zero_without_false_light_off(hass, config_entry):
+    settings, mapping, light = configured_matter(hass, config_entry)
+    hass.states.async_set(light.entity_id, "unavailable", {"brightness": 255, "color_temp_kelvin": 2475})
+    event, partial = sample_measurements(hass, settings, mapping, dt_util.utcnow())
+    body = json.loads(event.payload)
+    assert partial
+    assert [(point["attributeDefinitionGuid"], point["value"]) for point in body["points"]] == [
+        (MATTER_DEFINITIONS[1]["attributeDefinitionGuid"], 0),
+    ]
+    assert len(body["metadata"]["unavailableMeasurements"]) == 3
+
+
+@pytest.mark.parametrize("state,attributes", [("unknown", {}), ("on", {"restored": True}), ("", {})])
+async def test_matter_unknown_or_restored_never_fabricates_availability(hass, config_entry, state, attributes):
+    settings, mapping, light = configured_matter(hass, config_entry)
+    hass.states.async_set(light.entity_id, state, attributes)
+    with pytest.raises(ValueError, match="unavailable"):
+        sample_measurements(hass, settings, mapping, dt_util.utcnow())
+
+
+@pytest.mark.parametrize("brightness", [None, True, -1, 256, "255", float("nan"), float("inf")])
+async def test_invalid_brightness_omits_only_that_reading(hass, config_entry, brightness):
+    settings, mapping, light = configured_matter(hass, config_entry)
+    hass.states.async_set(light.entity_id, "on", {"brightness": brightness, "color_temp_kelvin": 2475})
+    event, partial = sample_measurements(hass, settings, mapping, dt_util.utcnow())
+    assert partial
+    assert [point["value"] for point in json.loads(event.payload)["points"]] == [1, 1, 2475]
+
+
+async def test_off_light_has_known_state_but_no_invented_brightness_or_temperature(hass, config_entry):
+    settings, mapping, light = configured_matter(hass, config_entry)
+    hass.states.async_set(light.entity_id, "off", {"brightness": None, "color_temp_kelvin": None})
+    event, partial = sample_measurements(hass, settings, mapping, dt_util.utcnow())
+    assert partial
+    assert [point["value"] for point in json.loads(event.payload)["points"]] == [0, 1]
+
+
+async def test_matter_identity_replacement_cannot_reuse_light_mapping(hass, config_entry):
+    settings, mapping, light = configured_matter(hass, config_entry)
+    for changed in (replace(mapping, anchor_unique_id="another-node"), replace(mapping, anchor_platform="wiz")):
+        with pytest.raises(ValueError, match="device_mismatch"):
+            sample_measurements(hass, settings, changed, dt_util.utcnow())
+    er.async_get(hass).async_update_entity(light.entity_id, device_id=None)
+    with pytest.raises(ValueError, match="device_mismatch"):
+        sample_measurements(hass, settings, mapping, dt_util.utcnow())
+
+
+async def test_state_only_measurement_fingerprint_survives_matter_upgrade(hass, config_entry):
+    _, mapping, *_ = configured(hass, config_entry)
+    old = asdict(mapping)
+    old.pop("device_key")
+    old.pop("name")
+    for source in old["readings"]:
+        source.pop("source_attribute")
+    expected = hashlib.sha256(json.dumps(old, sort_keys=True).encode()).hexdigest()
+    legacy = asdict(mapping)
+    for source in legacy["readings"]:
+        source.pop("source_attribute")
+    assert MeasurementMapping.from_dict(legacy).fingerprint == expected == mapping.fingerprint
+    changed = replace(mapping, readings=(replace(mapping.readings[0], unit="0/1", source_attribute="availability"),))
+    assert changed.fingerprint != mapping.fingerprint
+
+
+@pytest.mark.parametrize("attribute,unit", [("private_text", "0/1"), ("brightness", "W"), ("availability", "%")])
+async def test_saved_matter_mapping_rejects_unsupported_attribute_or_unit(hass, config_entry, attribute, unit):
+    _, mapping, _ = configured_matter(hass, config_entry)
+    changed = replace(mapping, readings=(replace(mapping.readings[1], source_attribute=attribute, unit=unit),))
+    with pytest.raises(ValueError, match="invalid_mapping"):
+        MeasurementMapping.from_dict(asdict(changed))
+
+
+@pytest.mark.parametrize("endpoint", ["http://127.0.0.1:41080", "http://8.8.8.8:41080",
+    "http://collector.local:41080", "http://192.168.68.13:80", "http://192.168.68.13:99999",
+    "http://user:password@192.168.68.13:41080", "http://192.168.68.13:41080/other", "http://192.168.68.13:41080?secret=1"])
+def test_edge_bridge_origin_is_an_explicit_private_lan_address(endpoint):
+    with pytest.raises(ValueError, match="invalid_mapping"):
+        edge_bridge_endpoint(endpoint)
+
+
+async def test_bridge_measurements_do_not_need_cloud_keys_on_home_assistant(hass, config_entry):
+    settings, mapping, _ = configured_matter(hass, config_entry)
+    settings = replace(settings, measurement_mappings=(replace(mapping, device_key=""),),
+                       edge_bridge_endpoint="http://192.168.68.13:41080",
+                       edge_bridge_token="ha-intake-token-12345678901234567890", edge_bridge_devices=(DEVICE_GUID,))
+    assert TelemetrySettings.from_dict(asdict(settings), TENANT) == settings
+    assert settings.edge_bridge_token not in repr(settings)
+    direct = asdict(replace(settings, edge_bridge_endpoint="", edge_bridge_token="", edge_bridge_devices=()))
+    with pytest.raises(ValueError, match="invalid_mapping"):
+        TelemetrySettings.from_dict(direct, TENANT)
+
+
+async def test_matter_battery_and_contact_report_actual_zero_and_binary_state(hass, config_entry):
+    settings, mapping, light = configured_matter(hass, config_entry)
+    registry = er.async_get(hass)
+    battery = registry.async_get_or_create("sensor", "matter", "battery", device_id=mapping.ha_device_id, unit_of_measurement="%")
+    contact = registry.async_get_or_create("binary_sensor", "matter", "contact", device_id=mapping.ha_device_id)
+    hass.states.async_set(battery.entity_id, "0", {"unit_of_measurement": "%"})
+    hass.states.async_set(contact.entity_id, "off")
+    battery_source = build_measurement_source(hass, battery, MATTER_DEFINITIONS[2])
+    contact_source = build_measurement_source(hass, contact, MATTER_DEFINITIONS[0], "on")
+    availability = build_measurement_source(hass, contact, MATTER_DEFINITIONS[1], source_attribute="availability")
+    mapping = replace(mapping, anchor_registry_id=contact.id, anchor_unique_id=contact.unique_id,
+                      readings=(battery_source, contact_source, availability))
+    event, partial = sample_measurements(hass, settings, mapping, dt_util.utcnow())
+    assert not partial
+    assert [point["value"] for point in json.loads(event.payload)["points"]] == [0, 0, 1]

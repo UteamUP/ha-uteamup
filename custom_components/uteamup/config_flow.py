@@ -44,6 +44,9 @@ from .const import (
     CONF_ENABLE_WEBHOOKS,
     CONF_ENABLE_TELEMETRY,
     CONF_DEVICE_KEY,
+    CONF_EDGE_BRIDGE_DEVICES,
+    CONF_EDGE_BRIDGE_ENDPOINT,
+    CONF_EDGE_BRIDGE_TOKEN,
     CONF_TELEMETRY,
     CONF_TENANT_GUID,
     DEFAULT_BASE_URL,
@@ -59,7 +62,7 @@ from .measurement_flow import MeasurementOptionsFlow
 from .telemetry_config import (
     NETWORK_METRICS, POWER_BASES, SOURCE_DOMAINS, DecoClientMapping, NetworkTelemetryMapping, TelemetryMapping,
     build_mapping, build_network_mapping, compatible_meter, environment_settings,
-    mapping_source_choices, network_source_choices,
+    mapping_source_choices, network_source_choices, edge_bridge_endpoint, valid_device_key, TelemetrySettings,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -189,7 +192,10 @@ class UteamupOptionsFlow(MeasurementOptionsFlow, OptionsFlow):
                 errors[CONF_ASSIGNEE_GUID] = "invalid_guid"
             else:
                 configure_measurements = user_input.pop("configure_measurements", False)
+                configure_edge_bridge = user_input.pop("configure_edge_bridge", False)
                 self._options = {**self.config_entry.options, **user_input}
+                if configure_edge_bridge:
+                    return await self.async_step_edge_bridge()
                 if configure_measurements:
                     return await self.async_step_measurement_device()
                 if self._options.get(CONF_ENABLE_TELEMETRY, False):
@@ -208,9 +214,54 @@ class UteamupOptionsFlow(MeasurementOptionsFlow, OptionsFlow):
                     description={"suggested_value": options.get(CONF_ENABLE_TELEMETRY, False)},
                 ): cv.boolean,
                 vol.Optional("configure_measurements", default=False): cv.boolean,
+                vol.Optional("configure_edge_bridge", default=False): cv.boolean,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+
+    async def async_step_edge_bridge(self, user_input=None):
+        errors = {}
+        devices = {}
+        old = self.config_entry.options.get(CONF_TELEMETRY, {})
+        if self._client is None:
+            self._client = create_client(self.hass, dict(self.config_entry.data))
+        try:
+            environment = environment_settings(await self._client.async_get_iot_environment(),
+                                               self.config_entry.data[CONF_TENANT_GUID])
+            devices = {item["externalGuid"]: item for item in await self._client.async_get_iot_devices()
+                       if item.get("isActive") and item.get("assetGuid")}
+            if user_input is not None:
+                selected = user_input.get("devices", [])
+                if len(set(selected)) != len(selected) or any(value not in devices for value in selected):
+                    raise ValueError("invalid_mapping")
+                saved = {**old, **environment}
+                for key in (CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN):
+                    saved.pop(key, None)
+                if selected:
+                    endpoint = edge_bridge_endpoint(user_input.get(CONF_EDGE_BRIDGE_ENDPOINT, ""))
+                    token = user_input.get(CONF_EDGE_BRIDGE_TOKEN, "").strip() or old.get(CONF_EDGE_BRIDGE_TOKEN, "")
+                    if len(token) < 32 or not valid_device_key(token):
+                        raise ValueError("invalid_mapping")
+                    saved.update({CONF_EDGE_BRIDGE_DEVICES: selected, CONF_EDGE_BRIDGE_ENDPOINT: endpoint,
+                                  CONF_EDGE_BRIDGE_TOKEN: token})
+                TelemetrySettings.from_dict(saved, self.config_entry.data[CONF_TENANT_GUID])
+                return self.async_create_entry(data={**self._options, CONF_TELEMETRY: saved})
+        except UteamupForbiddenError:
+            errors["base"] = "telemetry_not_allowed"
+        except UteamupError:
+            errors["base"] = "cannot_connect"
+        except (KeyError, TypeError, ValueError):
+            errors["base"] = "invalid_mapping"
+        choices = [{"value": guid, "label": item["name"]} for guid, item in devices.items()]
+        defaults = {**old, **{key: value for key, value in (user_input or {}).items()
+                             if key != CONF_EDGE_BRIDGE_TOKEN}}
+        return self.async_show_form(step_id="edge_bridge", errors=errors, data_schema=vol.Schema({
+            vol.Required("devices", default=defaults.get("devices", list(old.get(CONF_EDGE_BRIDGE_DEVICES, [])))): SelectSelector(
+                SelectSelectorConfig(options=choices, multiple=True, mode=SelectSelectorMode.DROPDOWN, sort=True)),
+            vol.Optional(CONF_EDGE_BRIDGE_ENDPOINT, default=defaults.get(CONF_EDGE_BRIDGE_ENDPOINT, "")): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.URL)),
+            vol.Optional(CONF_EDGE_BRIDGE_TOKEN): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+        }))
 
     async def async_step_telemetry_devices(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Discover an approved endpoint and existing asset-bound devices; never provision."""

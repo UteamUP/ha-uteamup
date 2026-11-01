@@ -43,7 +43,7 @@ def retry_delay(attempts: int, requested_delay: float) -> float:
     return max(requested_delay, min(3600, 5 * 2 ** min(attempts, 10)) * random.uniform(0.8, 1.2))
 
 
-def _matching_ack(body: bytes, envelope: QueuedEnvelope) -> bool:
+def _matching_ack(body: bytes, envelope: QueuedEnvelope, stage: str | None = None) -> bool:
     try:
         response = json.loads(body)
         return (
@@ -52,29 +52,49 @@ def _matching_ack(body: bytes, envelope: QueuedEnvelope) -> bool:
             and UUID(response["eventId"]) == UUID(envelope.event_id)
             and UUID(response["tenantGuid"]) == UUID(envelope.tenant_guid)
             and UUID(response["deviceGuid"]) == UUID(envelope.device_guid)
+            and (stage is None or response.get("stage") == stage)
         )
     except (ValueError, KeyError, TypeError, AttributeError):
         return False
 
 
 class TelemetryTransport:
-    """Never redirect credentials, disable certificate verification or fall back to CMMS."""
+    """Use the reviewed cloud or LAN route; never redirect credentials or fall back between routes."""
 
-    def __init__(self, session: aiohttp.ClientSession, endpoint: str) -> None:
+    def __init__(self, session: aiohttp.ClientSession, endpoint: str, *, edge_bridge_endpoint: str = "",
+                 edge_bridge_token: str = "", edge_bridge_devices: tuple[str, ...] = ()) -> None:
         self._session = session
         self._endpoint = endpoint
+        self._bridge_endpoint = edge_bridge_endpoint
+        self._bridge_token = edge_bridge_token
+        self._bridge_devices = frozenset(edge_bridge_devices)
 
     async def async_send(self, envelope: QueuedEnvelope, device_key: str) -> DeliveryResult:
+        bridged = envelope.device_guid in self._bridge_devices
+        endpoint = f"{self._endpoint}/v1/telemetry/batch"
+        payload = envelope.payload
+        headers = {"X-Device-Key": device_key, "Content-Type": "application/json"}
+        if bridged:
+            if not self._bridge_endpoint or not self._bridge_token:
+                return DeliveryResult("configuration")
+            try:
+                body = json.loads(payload)
+                payload = json.dumps({"source": "homeassistant", "kind": "telemetry",
+                                      "observedAt": body["observedAt"], "envelope": body},
+                                     separators=(",", ":"), allow_nan=False).encode()
+            except (ValueError, KeyError, TypeError):
+                return DeliveryResult("payload_rejected")
+            endpoint = f"{self._bridge_endpoint}/v1/intake/telemetry"
+            headers = {"Authorization": f"Bearer {self._bridge_token}", "Content-Type": "application/json"}
         try:
             async with self._session.post(
-                f"{self._endpoint}/v1/telemetry/batch", data=envelope.payload,
-                headers={"X-Device-Key": device_key, "Content-Type": "application/json"},
+                endpoint, data=payload, headers=headers,
                 timeout=REQUEST_TIMEOUT, ssl=True, allow_redirects=False,
             ) as response:
                 delay = retry_after_seconds(response.headers.get("Retry-After"), datetime.now(UTC))
                 if response.status == 202:
                     body = await response.content.read(MAX_ACK_BYTES + 1)
-                    if len(body) <= MAX_ACK_BYTES and _matching_ack(body, envelope):
+                    if len(body) <= MAX_ACK_BYTES and _matching_ack(body, envelope, "edgebridge_intake" if bridged else None):
                         return DeliveryResult("accepted")
                     # Ambiguous acknowledgements must replay the same event, never a new UUID.
                     return DeliveryResult("retrying", delay)

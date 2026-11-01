@@ -58,7 +58,8 @@
           "enable_webhooks": "Receive live events",
           "assignee_guid": "Only list work orders assigned to (user GUID)",
           "enable_telemetry": "Send readings to dedicated IoT",
-          "configure_measurements": "Configure other measurements"
+          "configure_measurements": "Configure other measurements",
+          "configure_edge_bridge": "Configure EdgeBridge delivery"
         },
         "data_description": {
           "enable_webhooks": "Needs the Enterprise plan and a public Home Assistant URL, such as Home Assistant Cloud. Polling continues either way.",
@@ -156,7 +157,7 @@
           "device_key": "Device ingestion key"
         },
         "data_description": {
-          "device_key": "Use this device’s own ingestion key. Leave blank only to keep its previously saved key."
+          "device_key": "For direct delivery use this device’s ingestion key. For a device routed through EdgeBridge leave this blank; its cloud key stays on out."
         }
       },
       "measurement_sources": {
@@ -172,12 +173,32 @@
         "data": {
           "attribute_guid": "Asset meter",
           "true_state": "Reported state meaning Yes",
-          "add_condition": "Add another condition from this source"
+          "add_condition": "Add another reading from this source"
         }
       },
       "measurement_confirm": {
         "title": "Confirm the asset connection",
         "description": "Send {count} selected measurements from {source} to {device}, asset {asset}, through {endpoint}. This enables delivery and keeps all other mappings. Only source readings are sent; no tank volume, refill deadline or fault meaning is inferred. Change the mapping later through Configure other measurements."
+      },
+      "measurement_kind": {
+        "title": "Choose the reading from {source}",
+        "description": "Choose a reported state, light attribute, or Home Assistant availability. Unavailable is recorded as availability 0; unknown or restored data is omitted. Brightness and color temperature are sent only when Home Assistant reports them. These are not power or energy measurements.",
+        "data": {
+          "source_attribute": "Reading"
+        }
+      },
+      "edge_bridge": {
+        "title": "Route selected devices through EdgeBridge",
+        "description": "Selected devices hand their observations to the local EdgeBridge collector. Only out uploads them to UPSense, using its own device keys. A collector receipt confirms local storage, not final UPSense delivery. Selected devices never fall back to direct cloud delivery. Clear the selection only when their direct device keys are configured.",
+        "data": {
+          "devices": "Devices delivered through EdgeBridge",
+          "edge_bridge_endpoint": "Collector origin on the private LAN",
+          "edge_bridge_token": "Dedicated Home Assistant intake token"
+        },
+        "data_description": {
+          "edge_bridge_endpoint": "For example http://192.168.68.13:41080. Use a literal private LAN address and an explicit port.",
+          "edge_bridge_token": "Use the dedicated telemetry intake token, not a UPSense device key. Leave blank to keep the saved token."
+        }
       }
     },
     "error": {
@@ -274,7 +295,7 @@
         "unit_of_measurement": "devices"
       },
       "telemetry_last_success": {
-        "name": "Last acknowledged IoT delivery"
+        "name": "Last acknowledged telemetry handoff"
       }
     },
     "binary_sensor": {
@@ -557,6 +578,14 @@
         "stolen": "Stolen",
         "in_transit": "In transit",
         "in_storage": "In storage"
+      }
+    },
+    "measurement_attribute": {
+      "options": {
+        "state": "Reported state or sensor value",
+        "availability": "Available in Home Assistant (0/1)",
+        "brightness": "Reported brightness (%)",
+        "color_temp_kelvin": "Reported color temperature (K)"
       }
     }
   }

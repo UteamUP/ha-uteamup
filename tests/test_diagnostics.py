@@ -15,6 +15,9 @@ from custom_components.uteamup.const import (
     CONF_ASSIGNEE_GUID,
     CONF_CLOUDHOOK_URL,
     CONF_DEVICE_KEY,
+    CONF_EDGE_BRIDGE_DEVICES,
+    CONF_EDGE_BRIDGE_ENDPOINT,
+    CONF_EDGE_BRIDGE_TOKEN,
     CONF_ENABLE_TELEMETRY,
     CONF_ENABLE_WEBHOOKS,
     CONF_TELEMETRY,
@@ -117,6 +120,9 @@ async def test_diagnostics_redact_nested_telemetry_identities_and_anonymize_sour
             CONF_TENANT_GUID: TENANT,
             "environment_guid": "private-environment-guid",
             "retry_nonce": "private-retry-nonce",
+            CONF_EDGE_BRIDGE_ENDPOINT: "http://192.168.68.13:41080",
+            CONF_EDGE_BRIDGE_TOKEN: "private-collector-token",
+            CONF_EDGE_BRIDGE_DEVICES: ["private-device-route"],
             "mappings": [mapping],
             "network_mappings": [{**deepcopy(mapping), "clients": container([deepcopy(mapping)])}],
             "measurement_mappings": [{**deepcopy(mapping), "readings": container([deepcopy(mapping)])}],
@@ -146,6 +152,8 @@ async def test_diagnostics_redact_nested_telemetry_identities_and_anonymize_sour
     assert TENANT not in serialized
     assert API_KEY not in serialized
     assert API_SECRET not in serialized
+    for key in (CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN):
+        assert diagnostic["options"][CONF_TELEMETRY][key] == "**REDACTED**"
     for mappings_key in ("mappings", "network_mappings", "measurement_mappings"):
         redacted = diagnostic["options"][CONF_TELEMETRY][mappings_key][0]
         assert all(redacted[key] == "**REDACTED**" for key in identity_fields)
