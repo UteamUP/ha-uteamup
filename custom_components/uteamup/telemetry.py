@@ -370,7 +370,7 @@ class UteamupTelemetry:
             self.health.client_links[mapping.device_guid] = "available"
             # Validate before attempting any writes. A foreign/duplicate response never changes associations.
             resolved_client_mappings(self.hass, mapping, now, links)
-            linked = {normalize_mac(link["macAddress"]) for link in links}
+            linked = {normalize_mac(link["macAddress"]) for link in links if link.get("macAddress")}
             candidates = [row for row in deco_clients(self.hass, mapping.tracker_registry_id, now)
                           if row["macAddress"] not in linked]
             if candidates and now.timestamp() - self._client_devices_at >= 300:

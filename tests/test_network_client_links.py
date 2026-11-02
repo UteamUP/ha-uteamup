@@ -45,6 +45,15 @@ async def test_server_link_can_target_existing_asset_with_new_meters_without_new
     assert result[0].tracker_registry_id == mapping.clients[0].tracker_registry_id
 
 
+async def test_ip_only_links_cannot_authorize_mac_readings_or_break_existing_links(hass):
+    _, mapping, _ = network(hass)
+    ip_link = {**server_link(mapping), "macAddress": "", "ipAddress": "192.168.68.20"}
+    assert not resolved_client_mappings(hass, mapping, dt_util.utcnow(), [ip_link])
+    assert len(resolved_client_mappings(hass, mapping, dt_util.utcnow(), [ip_link, server_link(mapping)])) == 1
+    with pytest.raises(ValueError, match="invalid_client_links"):
+        resolved_client_mappings(hass, mapping, dt_util.utcnow(), [ip_link, ip_link])
+
+
 @pytest.mark.parametrize("invalid", ["foreign", "duplicate", "missing_meter"])
 async def test_foreign_duplicate_and_incomplete_responses_fail_closed(hass, invalid):
     _, mapping, _ = network(hass)
@@ -74,7 +83,7 @@ async def test_runtime_auto_matches_only_unique_existing_device_and_persists_onc
     client.async_link_network_client.assert_awaited_once_with(mapping.device_guid, {
         "macAddress": "aabbccddeeff", "autoMatch": True,
     })
-    client.async_get_network_client_links.return_value = [link]
+    client.async_get_network_client_links.return_value = [link, {**link, "macAddress": "", "ipAddress": "192.168.68.20"}]
     await runtime._async_resolve_clients(unmapped, dt_util.utcnow())
     assert client.async_link_network_client.await_count == 1
 

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from .telemetry_config import NetworkTelemetryMapping
 
 MAX_SOURCE_AGE = timedelta(minutes=10)
-CLIENT_TYPE_NAME = "Deco client telemetry"
+CLIENT_TYPE_NAME = "Network client telemetry"
 CLIENT_FIELDS = {
     "download": ("deco_client_download_kilobytes_per_s", "Client download"),
     "upload": ("deco_client_upload_kilobytes_per_s", "Client upload"),
@@ -108,7 +108,7 @@ async def prepare_client_meters(client: UteamupClient, asset_guid: str) -> dict[
     """Add only missing definitions to a tenant custom type and preserve all existing types."""
     asset = await client.async_get_asset(asset_guid)
     types = await client.async_get_asset_types()
-    candidates = [item for item in types if item.get("name") == CLIENT_TYPE_NAME
+    candidates = [item for item in types if item.get("name") in {CLIENT_TYPE_NAME, "Deco client telemetry"}
                   and item.get("isSystemType") is False and item.get("isActive") is True]
     if len(candidates) > 1:
         raise ValueError("ambiguous_client_type")
@@ -117,7 +117,7 @@ async def prepare_client_meters(client: UteamupClient, asset_guid: str) -> dict[
     else:
         asset_type = await client.async_create_asset_type({
             "name": CLIENT_TYPE_NAME, "categoryGroup": 10, "isMetered": True,
-            "description": "Reported Deco client rates and connectivity. DNS queries and remote flows are not supplied by Deco.",
+            "description": "Reported client rates and connectivity. Missing measurements remain unknown; no DNS or flow rates are inferred.",
             "attributeDefinitions": client_meter_definitions(),
         })
     type_guid = public_guid(asset_type["externalGuid"])
@@ -183,6 +183,16 @@ def resolved_client_mappings(
     for link in links:
         if not isinstance(link, dict) or public_guid(link.get("gatewayDeviceGuid")) != mapping.device_guid:
             raise ValueError("invalid_client_links")
+        if not link.get("macAddress") and link.get("ipAddress") is not None:
+            address = link["ipAddress"]
+            if not isinstance(address, str) or "%" in address:
+                raise ValueError("invalid_client_links")
+            identity = "ip:" + str(ip_address(address))
+            if identity in seen:
+                raise ValueError("invalid_client_links")
+            seen.add(identity)
+            # A source-local IP link never authorizes this MAC-based exporter's readings.
+            continue
         mac = normalize_mac(link.get("macAddress"))
         if mac in seen:
             raise ValueError("invalid_client_links")
