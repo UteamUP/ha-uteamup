@@ -324,7 +324,7 @@ class UteamupTelemetry:
             try:
                 now = dt_util.utcnow()
                 resolved = await self._async_resolve_clients(mapping, now)
-                # Queued observations retain the asset selected at capture time. Changing a link
+                # Queued observations retain the resource selected at capture time. Changing a link
                 # affects future samples, not the identity or contents of historical envelopes.
                 envelope = sample_network_envelope(self.hass, self.settings, mapping, now, resolved)
             except SourceUnavailable as err:
@@ -398,7 +398,7 @@ class UteamupTelemetry:
                 attempts += 1
                 try:
                     # Existing explicitly reviewed HA mappings migrate without changing their asset.
-                    request = {"macAddress": row["macAddress"], **({"assetGuid": previous.asset_guid}
+                    request = {"macAddress": row["macAddress"], **(previous.owner_payload
                                if previous is not None else {"autoMatch": True})}
                     links.append(await self._client.async_link_network_client(mapping.device_guid, request))
                 except UteamupError:

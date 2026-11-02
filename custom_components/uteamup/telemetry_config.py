@@ -168,10 +168,23 @@ CLIENT_METRICS = (("download", "kB/s"), ("upload", "kB/s"), ("connected", "0/1")
 class DecoClientMapping:
     tracker_registry_id: str
     mac_address: str
-    asset_guid: str
+    asset_guid: str | None
     download_attribute_guid: str
     upload_attribute_guid: str
     connected_attribute_guid: str
+    part_guid: str | None = None
+    tool_guid: str | None = None
+    link_guid: str | None = None
+    link_revision: str | None = None
+
+    @property
+    def owner_payload(self) -> dict[str, str]:
+        owners = {key: public_guid(value) for key, value in (
+            ("assetGuid", self.asset_guid), ("partGuid", self.part_guid), ("toolGuid", self.tool_guid),
+        ) if value is not None}
+        if len(owners) != 1:
+            raise ValueError("invalid_client_links")
+        return owners
 
 
 @dataclass(frozen=True)
@@ -207,6 +220,11 @@ class NetworkTelemetryMapping:
         identity = asdict(self)
         identity.pop(CONF_DEVICE_KEY)
         identity.pop("name")
+        for client in identity["clients"]:
+            # New optional server-owner fields must not invalidate already queued asset samples.
+            for key in ("part_guid", "tool_guid", "link_guid", "link_revision"):
+                if client[key] is None:
+                    client.pop(key)
         if not self.clients:
             identity.pop("clients")
         return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
@@ -354,12 +372,18 @@ class TelemetrySettings:
             for client in mapping.clients:
                 UUID(client.tracker_registry_id)
                 normalize_mac(client.mac_address)
-                public_guid(client.asset_guid)
+                _ = client.owner_payload
+                for identifier in (client.link_guid, client.link_revision):
+                    if identifier is not None:
+                        public_guid(identifier)
                 for name, _ in CLIENT_METRICS:
                     public_guid(getattr(client, f"{name}_attribute_guid"))
         clients = [client for mapping in network_mappings for client in mapping.clients]
-        if (len({client.tracker_registry_id for client in clients}) != len(clients)
-                or len({client.asset_guid for client in clients}) != len(clients)):
+        source_clients = {(mapping.device_guid, client.tracker_registry_id)
+                          for mapping in network_mappings for client in mapping.clients}
+        meters = {(tuple(client.owner_payload.items()), getattr(client, f"{name}_attribute_guid"))
+                  for client in clients for name, _ in CLIENT_METRICS}
+        if len(source_clients) != len(clients) or len(meters) != len(clients) * len(CLIENT_METRICS):
             raise ValueError("device_mismatch")
         return cls(
             endpoint=ingestion_endpoint(data["endpoint"]),

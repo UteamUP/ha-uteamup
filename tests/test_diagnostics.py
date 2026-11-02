@@ -102,7 +102,7 @@ async def test_diagnostics_export_counts_without_account_or_record_details(hass,
 @pytest.mark.parametrize("container", [list, tuple])
 async def test_diagnostics_redact_nested_telemetry_identities_and_anonymize_sources(hass, config_entry, container):
     identity_fields = (
-        "device_guid", "asset_guid", "name", "ha_device_id", "mac_address", "source_registry_id",
+        "device_guid", "asset_guid", "part_guid", "tool_guid", "link_guid", "link_revision", "name", "ha_device_id", "mac_address", "source_registry_id",
         "power_registry_id", "energy_registry_id", "power_attribute_guid", "energy_attribute_guid",
         "estimate_profile", "tracker_registry_id", "download_registry_id", "upload_registry_id",
         "clients_registry_id", "internet_registry_id", "router_registry_id", "download_attribute_guid",

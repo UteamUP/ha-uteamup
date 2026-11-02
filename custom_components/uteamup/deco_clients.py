@@ -1,4 +1,4 @@
-"""Deco client observations and explicitly reviewed links to existing tenant assets."""
+"""Deco client observations and reviewed links to existing tenant inventory."""
 
 from __future__ import annotations
 
@@ -154,7 +154,8 @@ def network_client_observations(
         binding = bindings.get(client["trackerRegistryId"])
         if binding is None or client["macAddress"] != binding.mac_address:
             continue
-        client["assetGuid"] = binding.asset_guid
+        owner = binding.owner_payload
+        client.update(owner)
         if client["connected"] is None:
             continue
         values = {"connected": float(client["connected"]),
@@ -163,10 +164,12 @@ def network_client_observations(
             if values[name] is None:
                 continue
             points.append({
-                "pointId": str(uuid4()), "assetGuid": binding.asset_guid,
+                "pointId": str(uuid4()), **owner,
                 "attributeDefinitionGuid": getattr(binding, f"{name}_attribute_guid"),
                 "value": values[name], "observedAt": client["sourceObservedAt"], "unit": unit, "quality": "measured",
-                "metadata": {"networkClientMac": client["macAddress"]},
+                "metadata": {"networkClientMac": client["macAddress"],
+                             **({"networkClientLinkGuid": binding.link_guid} if binding.link_guid else {}),
+                             **({"networkClientLinkRevision": binding.link_revision} if binding.link_revision else {})},
             })
     return clients, points
 
@@ -180,6 +183,7 @@ def resolved_client_mappings(
     observed = {client["macAddress"]: client for client in deco_clients(hass, mapping.tracker_registry_id, now)}
     result = []
     seen = set()
+    seen_meters = set()
     for link in links:
         if not isinstance(link, dict) or public_guid(link.get("gatewayDeviceGuid")) != mapping.device_guid:
             raise ValueError("invalid_client_links")
@@ -199,11 +203,24 @@ def resolved_client_mappings(
         seen.add(mac)
         if link.get("state") != "linked" or mac not in observed:
             continue
+        owners = {key: public_guid(link[key]) for key in ("assetGuid", "partGuid", "toolGuid")
+                  if link.get(key) is not None}
+        if len(owners) != 1:
+            raise ValueError("invalid_client_links")
+        link_guid = public_guid(link["linkGuid"]) if link.get("linkGuid") is not None else None
+        revision = public_guid(link["revision"]) if link.get("revision") is not None else None
+        if "assetGuid" not in owners and (link_guid is None or revision is None):
+            raise ValueError("invalid_client_links")
+        meters = {f"{name}_attribute_guid": public_guid(link.get(f"{name}AttributeGuid"))
+                  for name, _ in CLIENT_METRICS}
+        identities = {(tuple(owners.items()), attribute) for attribute in meters.values()}
+        if len(identities) != len(CLIENT_METRICS) or seen_meters.intersection(identities):
+            raise ValueError("invalid_client_links")
+        seen_meters.update(identities)
         result.append(DecoClientMapping(
             tracker_registry_id=observed[mac]["trackerRegistryId"], mac_address=mac,
-            asset_guid=public_guid(link.get("assetGuid")),
-            download_attribute_guid=public_guid(link.get("downloadAttributeGuid")),
-            upload_attribute_guid=public_guid(link.get("uploadAttributeGuid")),
-            connected_attribute_guid=public_guid(link.get("connectedAttributeGuid")),
+            asset_guid=owners.get("assetGuid"), part_guid=owners.get("partGuid"), tool_guid=owners.get("toolGuid"),
+            link_guid=link_guid, link_revision=revision,
+            **meters,
         ))
     return tuple(result)
