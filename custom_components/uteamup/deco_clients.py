@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from .telemetry_config import NetworkTelemetryMapping
 
 MAX_SOURCE_AGE = timedelta(minutes=10)
-CLIENT_TYPE_NAME = "Network client telemetry"
+CLIENT_TYPE_NAME = "Deco client telemetry"
 CLIENT_FIELDS = {
     "download": ("deco_client_download_kilobytes_per_s", "Client download"),
     "upload": ("deco_client_upload_kilobytes_per_s", "Client upload"),
@@ -108,7 +108,7 @@ async def prepare_client_meters(client: UteamupClient, asset_guid: str) -> dict[
     """Add only missing definitions to a tenant custom type and preserve all existing types."""
     asset = await client.async_get_asset(asset_guid)
     types = await client.async_get_asset_types()
-    candidates = [item for item in types if item.get("name") in {CLIENT_TYPE_NAME, "Deco client telemetry"}
+    candidates = [item for item in types if item.get("name") in {CLIENT_TYPE_NAME, "Network client telemetry"}
                   and item.get("isSystemType") is False and item.get("isActive") is True]
     if len(candidates) > 1:
         raise ValueError("ambiguous_client_type")

@@ -117,7 +117,7 @@ async def test_missing_meters_are_added_and_existing_asset_types_preserved():
     type_guid, primary, extra = str(uuid4()), str(uuid4()), str(uuid4())
     definitions = [{**item, "externalGuid": str(uuid4()), "isActive": True} for item in client_meter_definitions()]
     client.async_get_asset.return_value = {"assetTypeGuids": [primary, extra], "primaryAssetTypeGuid": primary, "updatedAt": "2026-01-01T00:00:00Z"}
-    client.async_get_asset_types.return_value = [{"name": "Deco client telemetry", "externalGuid": type_guid, "isActive": True, "isSystemType": False}]
+    client.async_get_asset_types.return_value = [{"name": "Network client telemetry", "externalGuid": type_guid, "isActive": True, "isSystemType": False}]
     client.async_get_asset_type.return_value = {"externalGuid": type_guid, "attributeDefinitions": definitions[:2]}
     client.async_add_asset_type_attribute.return_value = definitions[2]
     meters = await prepare_client_meters(client, ASSET_GUID)
