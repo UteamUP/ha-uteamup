@@ -10,7 +10,7 @@ import math
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -173,8 +173,8 @@ def sample_network_envelope(
         for state in states.values()
     ):
         raise SourceUnavailable("unavailable")
-    if now - tracker_state.last_reported > MAX_SOURCE_AGE or any(
-        now - state.last_reported > MAX_SOURCE_AGE for state in states.values()
+    if not timedelta(0) <= now - tracker_state.last_reported <= MAX_SOURCE_AGE or any(
+        not timedelta(0) <= now - state.last_reported <= MAX_SOURCE_AGE for state in states.values()
     ):
         raise SourceUnavailable("stale")
     values: dict[str, float] = {}
@@ -326,7 +326,8 @@ class UteamupTelemetry:
                 resolved = await self._async_resolve_clients(mapping, now)
                 # Queued observations retain the resource selected at capture time. Changing a link
                 # affects future samples, not the identity or contents of historical envelopes.
-                envelope = sample_network_envelope(self.hass, self.settings, mapping, now, resolved)
+                # Sources may update during the link lookup; timestamp the snapshot after its await.
+                envelope = sample_network_envelope(self.hass, self.settings, mapping, dt_util.utcnow(), resolved)
             except SourceUnavailable as err:
                 self.health.sources[mapping.device_guid] = str(err)
                 continue

@@ -336,6 +336,47 @@ async def test_deco_envelope_exports_all_five_metrics_and_binary_states(hass, co
     assert DEVICE_KEY.encode() not in event.payload
 
 
+async def test_deco_capture_after_link_lookup_keeps_points_within_envelope(hass, config_entry, freezer):
+    settings, mapping, _, entities = network_configured(hass, config_entry)
+    telemetry = UteamupTelemetry(hass, config_entry, settings)
+
+    async def resolve_clients(*_):
+        freezer.tick(timedelta(seconds=1))
+        source = entities["download"]
+        state = hass.states.get(source.entity_id)
+        hass.states.async_set(source.entity_id, "42", dict(state.attributes))
+        return mapping
+
+    telemetry._async_resolve_clients = AsyncMock(side_effect=resolve_clients)
+    await telemetry.async_sample_once()
+
+    event = await telemetry.queue.async_next(dt_util.utcnow().timestamp())
+    assert event is not None
+    body = json.loads(event.payload)
+    assert body["observedAt"] == dt_util.utcnow().isoformat()
+    assert all(dt_util.parse_datetime(point["observedAt"]) <= dt_util.parse_datetime(body["observedAt"])
+               for point in body["points"])
+    assert body["points"][0]["value"] == 42
+    assert body["points"][0]["observedAt"] == hass.states.get(entities["download"].entity_id).last_reported.isoformat()
+    telemetry.transport.async_send = AsyncMock(return_value=DeliveryResult("accepted"))
+    assert await telemetry.async_send_once()
+    stats = await telemetry.queue.async_stats()
+    assert (stats.pending, stats.quarantined, stats.blocked_devices) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("source_name", ["tracker", "download"])
+async def test_deco_future_source_is_not_queued(hass, config_entry, freezer, source_name):
+    settings, mapping, tracker, entities = network_configured(hass, config_entry)
+    captured_at = dt_util.utcnow()
+    freezer.tick(timedelta(seconds=1))
+    source = tracker if source_name == "tracker" else entities[source_name]
+    state = hass.states.get(source.entity_id)
+    hass.states.async_set(source.entity_id, state.state, dict(state.attributes))
+
+    with pytest.raises(SourceUnavailable, match="stale"):
+        sample_network_envelope(hass, settings, mapping, captured_at)
+
+
 @pytest.mark.parametrize("name", [name for name, _, _ in NETWORK_METRICS])
 async def test_deco_unavailable_source_emits_no_reading(hass, config_entry, name):
     settings, mapping, _, entities = network_configured(hass, config_entry)
