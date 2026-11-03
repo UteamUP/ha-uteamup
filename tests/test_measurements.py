@@ -1,6 +1,7 @@
 """Generic sensors retain actual observations, independent availability and physical identity."""
 
 from dataclasses import asdict, replace
+from datetime import timedelta
 import hashlib
 import json
 from uuid import NAMESPACE_URL, uuid5
@@ -9,7 +10,10 @@ import pytest
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from custom_components.uteamup.measurements import build_measurement_source, measurement_choices, sample_measurements
+from custom_components.uteamup.measurements import (
+    ComponentMeasurementSelection, ComponentMeasurementSource, build_measurement_source, measurement_choices,
+    sample_component_measurements, sample_measurements,
+)
 from custom_components.uteamup.telemetry import UteamupTelemetry
 from custom_components.uteamup.telemetry_config import MeasurementMapping, MeasurementSource, TelemetrySettings
 from custom_components.uteamup.telemetry_config import edge_bridge_endpoint
@@ -37,6 +41,69 @@ def configured_matter(hass, config_entry):
                                  light.platform, readings, DEVICE_KEY)
     settings = TelemetrySettings(ENDPOINT, TENANT, ENVIRONMENT_GUID, (), measurement_mappings=(mapping,))
     return settings, mapping, light
+
+
+def component_selection(mapping: MeasurementMapping) -> ComponentMeasurementSelection:
+    return ComponentMeasurementSelection(mapping.ha_device_id, mapping.anchor_registry_id, mapping.anchor_unique_id, tuple(
+        ComponentMeasurementSource(reading.source_registry_id, reading.unit, reading.true_state,
+                                   reading.known_states, reading.source_attribute)
+        for reading in mapping.readings
+    ))
+
+
+def capture_component(hass, selection, now=None):
+    return sample_component_measurements(hass, selection, tenant_guid=TENANT, source_guid=DEVICE_GUID,
+                                         generation_guid=ENVIRONMENT_GUID, now=now or dt_util.utcnow())
+
+
+async def test_v2_matter_uses_actual_mac_free_registry_ids_through_an_entity_rename(hass, config_entry):
+    _, mapping, light = configured_matter(hass, config_entry)
+    assert not dr.async_get(hass).async_get(mapping.ha_device_id).connections
+    selection = component_selection(mapping)
+    now = dt_util.utcnow()
+    wire, partial = capture_component(hass, selection, now)
+    result = json.loads(wire)
+    assert not partial
+    assert result["schemaVersion"] == 2
+    assert result["tenantGuid"] == TENANT
+    assert result["sourceInstallationGuid"] == DEVICE_GUID
+    assert result["sourceGenerationGuid"] == ENVIRONMENT_GUID
+    assert result["sampledAt"] == now.isoformat()
+    before = result["observations"]
+    assert {tuple(row["identity"].values()) for row in before} == {("homeassistant.device-registry", mapping.ha_device_id)}
+    assert {row["channel"]["stableId"] for row in before} == {light.id}
+    assert {row["channel"]["attribute"]: row["value"] for row in before} == {
+        "state.on": 1, "availability": 1, "brightness": 50, "color_temp_kelvin": 2475,
+    }
+    assert {row["observedAt"] for row in before} == {now.isoformat()}
+    assert not any(field in wire for field in (b"assetGuid", b"attributeDefinitionGuid", b"deviceGuid", DEVICE_KEY.encode()))
+
+    registry = er.async_get(hass)
+    renamed = registry.async_update_entity(light.entity_id, new_entity_id="light.renamed_component")
+    hass.states.async_set(renamed.entity_id, "on", {"brightness": 127.5, "color_temp_kelvin": 2475})
+    after = json.loads(capture_component(hass, selection)[0])["observations"]
+    assert [row["channel"] for row in before] == [row["channel"] for row in after]
+    assert {row["suggestions"]["entityId"] for row in after} == {renamed.entity_id}
+
+
+async def test_v2_matter_distinguishes_explicit_availability_from_missing_or_stale_values(hass, config_entry):
+    _, mapping, light = configured_matter(hass, config_entry)
+    selection = component_selection(mapping)
+    hass.states.async_set(light.entity_id, "unavailable", {"brightness": 125, "color_temp_kelvin": 2700})
+    wire, partial = capture_component(hass, selection)
+    observations = json.loads(wire)["observations"]
+    assert partial and len(observations) == 1
+    assert observations[0]["channel"]["attribute"] == "availability"
+    assert observations[0]["value"] == 0
+
+    with pytest.raises(ValueError, match="unavailable"):
+        capture_component(hass, selection, dt_util.utcnow() - timedelta(minutes=1))
+    hass.states.async_set(light.entity_id, "unknown")
+    with pytest.raises(ValueError, match="unavailable"):
+        capture_component(hass, selection)
+    er.async_get(hass).async_update_entity(light.entity_id, device_id=None)
+    with pytest.raises(ValueError, match="device_mismatch"):
+        capture_component(hass, selection)
 
 
 def configured(hass, config_entry):
