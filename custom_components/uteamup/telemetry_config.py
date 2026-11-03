@@ -7,6 +7,7 @@ import json
 from ipaddress import IPv4Address, IPv4Network
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from unicodedata import category
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -14,10 +15,12 @@ from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, STATE_UNAVAILABLE, STA
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from .const import CONF_DEVICE_KEY, CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN, CONF_TENANT_GUID
+from .const import (CONF_COMPONENT_TELEMETRY, CONF_DEVICE_KEY, CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT,
+                    CONF_EDGE_BRIDGE_TOKEN, CONF_TENANT_GUID)
 
 SOURCE_DOMAINS = ("light", "switch")
 POWER_BASES = ("estimated", "measured")
+MAX_COMPONENT_READINGS = 96
 
 
 def public_guid(value: Any) -> str:
@@ -305,6 +308,115 @@ class MeasurementMapping:
         return hashlib.sha256(self.device_key.encode()).hexdigest()
 
 
+def component_registry_id(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("invalid_registry_identity")
+    identifier = UUID(value)
+    if identifier.int == 0 or value not in {identifier.hex, str(identifier)}:
+        raise ValueError("invalid_registry_identity")
+    return value
+
+
+@dataclass(frozen=True)
+class ComponentMeasurementSource:
+    """One reviewed local Matter observation, without a target GUID."""
+
+    source_registry_id: str
+    unit: str
+    true_state: str = ""
+    known_states: tuple[str, ...] = ()
+    source_attribute: str = "state"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ComponentMeasurementSource:
+        if not isinstance(data, dict) or set(data) - {"source_registry_id", "unit", "true_state", "known_states", "source_attribute"}:
+            raise ValueError("invalid_mapping")
+        states = data.get("known_states", ())
+        if not isinstance(states, (tuple, list)):
+            raise ValueError("invalid_mapping")
+        source = cls(**{**data, "known_states": tuple(states)})
+        component_registry_id(source.source_registry_id)
+        _ = source.channel_attribute
+        return source
+
+    @property
+    def channel_attribute(self) -> str:
+        attribute_units = {"availability": "0/1", "brightness": "%", "color_temp_kelvin": "K"}
+        if (not isinstance(self.unit, str) or not self.unit or self.unit != self.unit.strip()
+                or any(category(character) in {"Cc", "Cf", "Cs"} for character in self.unit)
+                or len(self.unit.encode("utf-16-le")) > 100):
+            raise ValueError("invalid_mapping")
+        if not isinstance(self.source_attribute, str) or not isinstance(self.true_state, str):
+            raise ValueError("invalid_mapping")
+        if self.source_attribute != "state":
+            if attribute_units.get(self.source_attribute) != self.unit or self.true_state or self.known_states:
+                raise ValueError("invalid_mapping")
+        if self.true_state or self.known_states:
+            if (self.unit != "0/1" or self.known_states != ("on", "off") or self.true_state not in self.known_states):
+                raise ValueError("invalid_mapping")
+            return f"state.{self.true_state}"
+        return self.source_attribute
+
+
+@dataclass(frozen=True)
+class ComponentMeasurementSelection:
+    ha_device_id: str
+    anchor_registry_id: str
+    anchor_unique_id: str
+    readings: tuple[ComponentMeasurementSource, ...]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ComponentMeasurementSelection:
+        if not isinstance(data, dict) or set(data) != {"ha_device_id", "anchor_registry_id", "anchor_unique_id", "readings"}:
+            raise ValueError("invalid_mapping")
+        readings = data["readings"]
+        if not isinstance(readings, (tuple, list)) or not 1 <= len(readings) <= 64:
+            raise ValueError("invalid_mapping")
+        selection = cls(component_registry_id(data["ha_device_id"]), component_registry_id(data["anchor_registry_id"]),
+                        data["anchor_unique_id"], tuple(ComponentMeasurementSource.from_dict(reading) for reading in readings))
+        if (not isinstance(selection.anchor_unique_id, str) or not selection.anchor_unique_id.strip()
+                or len(selection.anchor_unique_id) > 512
+                or len({(reading.source_registry_id, reading.channel_attribute) for reading in selection.readings}) != len(readings)):
+            raise ValueError("invalid_mapping")
+        return selection
+
+
+@dataclass(frozen=True)
+class ComponentTelemetrySettings:
+    source_installation_guid: str
+    source_generation_guid: str
+    environment_guid: str
+    selections: tuple[ComponentMeasurementSelection, ...]
+    device_key: str = field(repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ComponentTelemetrySettings:
+        fields = {"source_installation_guid", "source_generation_guid", "environment_guid", "selections", CONF_DEVICE_KEY}
+        if (not isinstance(data, dict) or set(data) != fields or not isinstance(data[CONF_DEVICE_KEY], str)
+                or not 8 <= len(data[CONF_DEVICE_KEY]) <= 500 or not valid_device_key(data[CONF_DEVICE_KEY])):
+            raise ValueError("invalid_mapping")
+        selections = data["selections"]
+        if not isinstance(selections, (tuple, list)) or not 1 <= len(selections) <= 32:
+            raise ValueError("invalid_mapping")
+        result = cls(public_guid(data["source_installation_guid"]), public_guid(data["source_generation_guid"]),
+                     public_guid(data["environment_guid"]),
+                     tuple(ComponentMeasurementSelection.from_dict(item) for item in selections), data[CONF_DEVICE_KEY])
+        if (sum(len(item.readings) for item in result.selections) > MAX_COMPONENT_READINGS
+                or len({UUID(item.ha_device_id) for item in result.selections}) != len(result.selections)):
+            raise ValueError("invalid_mapping")
+        return result
+
+    @property
+    def fingerprint(self) -> str:
+        data = asdict(self)
+        data.pop(CONF_DEVICE_KEY)
+        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    @property
+    def credential_hash(self) -> str:
+        return hashlib.sha256(self.device_key.encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class TelemetrySettings:
     endpoint: str
@@ -317,11 +429,13 @@ class TelemetrySettings:
     edge_bridge_endpoint: str = ""
     edge_bridge_token: str = field(default="", repr=False)
     edge_bridge_devices: tuple[str, ...] = ()
+    component_telemetry: ComponentTelemetrySettings | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], tenant_guid: str) -> TelemetrySettings:
         """Revalidate saved data before any network traffic after a restart."""
         tenant = public_guid(data[CONF_TENANT_GUID])
+        environment = public_guid(data["environment_guid"])
         if tenant != public_guid(tenant_guid):
             raise ValueError("device_mismatch")
         bridge_devices = tuple(public_guid(value) for value in data.get(CONF_EDGE_BRIDGE_DEVICES, ()))
@@ -337,9 +451,16 @@ class TelemetrySettings:
         measurement_mappings = tuple(MeasurementMapping.from_dict(item, require_device_key=item["device_guid"] not in bridge_devices)
                                      for item in data.get("measurement_mappings", []))
         combined = (*mappings, *network_mappings, *measurement_mappings)
-        if not combined or len({item.device_guid for item in combined}) != len(combined):
+        component_value = data.get(CONF_COMPONENT_TELEMETRY)
+        components = ComponentTelemetrySettings.from_dict(component_value) if component_value is not None else None
+        if (not combined and components is None) or len({item.device_guid for item in combined}) != len(combined):
             raise ValueError("device_mismatch")
         if len({item.ha_device_id for item in combined}) != len(combined):
+            raise ValueError("device_mismatch")
+        if components is not None and (components.environment_guid != environment
+                or components.source_installation_guid in bridge_devices
+                or components.source_installation_guid in {public_guid(item.device_guid) for item in combined}
+                or {UUID(selection.ha_device_id) for selection in components.selections} & {UUID(item.ha_device_id) for item in combined}):
             raise ValueError("device_mismatch")
         for mapping in mappings:
             for identifier in (
@@ -388,7 +509,7 @@ class TelemetrySettings:
         return cls(
             endpoint=ingestion_endpoint(data["endpoint"]),
             tenant_guid=tenant,
-            environment_guid=public_guid(data["environment_guid"]),
+            environment_guid=environment,
             mappings=mappings,
             retry_nonce=str(data.get("retry_nonce", "")),
             network_mappings=network_mappings,
@@ -396,6 +517,7 @@ class TelemetrySettings:
             edge_bridge_endpoint=bridge_endpoint,
             edge_bridge_token=bridge_token,
             edge_bridge_devices=bridge_devices,
+            component_telemetry=components,
         )
 
 

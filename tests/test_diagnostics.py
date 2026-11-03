@@ -208,3 +208,21 @@ async def test_diagnostics_never_export_records_or_text_through_count_fields(has
     assert "private-" not in json.dumps(diagnostic)
     assert TENANT not in json.dumps(diagnostic)
     assert data == original
+
+
+async def test_diagnostics_exclude_the_entire_component_collector_configuration(hass, config_entry):
+    options = {CONF_TELEMETRY: {"component_telemetry": {
+        "device_key": "private-component-key",
+        "source_installation_guid": "private-component-source",
+        "source_generation_guid": "private-component-generation",
+        "selections": ({"ha_device_id": "private-component-registry"},),
+    }}}
+    config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(config_entry, options=options)
+    config_entry.runtime_data = UteamupRuntimeData(MagicMock(), MagicMock(data=UteamupData()))
+
+    diagnostic = await async_get_config_entry_diagnostics(hass, config_entry)
+
+    assert diagnostic["options"][CONF_TELEMETRY]["component_telemetry"] == "**REDACTED**"
+    assert "private-component-" not in json.dumps(diagnostic)
+    assert config_entry.options == options

@@ -11,11 +11,13 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from custom_components.uteamup.measurements import (
-    ComponentMeasurementSelection, ComponentMeasurementSource, build_measurement_source, measurement_choices,
-    sample_component_measurements, sample_measurements,
+    build_measurement_source, measurement_choices, sample_component_batch, sample_component_measurements, sample_measurements,
 )
 from custom_components.uteamup.telemetry import UteamupTelemetry
-from custom_components.uteamup.telemetry_config import MeasurementMapping, MeasurementSource, TelemetrySettings
+from custom_components.uteamup.telemetry_config import (
+    ComponentMeasurementSelection, ComponentMeasurementSource, ComponentTelemetrySettings,
+    MeasurementMapping, MeasurementSource, TelemetrySettings,
+)
 from custom_components.uteamup.telemetry_config import edge_bridge_endpoint
 from .conftest import ASSET_GUID, ATTRIBUTE_GUID, TENANT
 from .test_telemetry_config import DEVICE_GUID, DEVICE_KEY, ENDPOINT, ENVIRONMENT_GUID, ENERGY_GUID
@@ -27,11 +29,12 @@ MATTER_DEFINITIONS = [
 ]
 
 
-def configured_matter(hass, config_entry):
-    config_entry.add_to_hass(hass)
+def configured_matter(hass, config_entry, node="fabric-node-1"):
+    if hass.config_entries.async_get_entry(config_entry.entry_id) is None:
+        config_entry.add_to_hass(hass)
     physical = dr.async_get(hass).async_get_or_create(config_entry_id=config_entry.entry_id,
-                                                    identifiers={("matter", "fabric-node-1")})
-    light = er.async_get(hass).async_get_or_create("light", "matter", "fabric-node-1-light", device_id=physical.id)
+                                                    identifiers={("matter", node)})
+    light = er.async_get(hass).async_get_or_create("light", "matter", f"{node}-light", device_id=physical.id)
     hass.states.async_set(light.entity_id, "on", {"supported_color_modes": ["color_temp", "xy"],
                                                "brightness": 127.5, "color_temp_kelvin": 2475})
     readings = tuple(build_measurement_source(hass, light, definition, "on" if attribute == "state" else "", attribute)
@@ -104,6 +107,53 @@ async def test_v2_matter_distinguishes_explicit_availability_from_missing_or_sta
     er.async_get(hass).async_update_entity(light.entity_id, device_id=None)
     with pytest.raises(ValueError, match="device_mismatch"):
         capture_component(hass, selection)
+
+
+def component_settings(*mappings: MeasurementMapping) -> ComponentTelemetrySettings:
+    return ComponentTelemetrySettings(str(uuid5(NAMESPACE_URL, "collector")), str(uuid5(NAMESPACE_URL, "generation")),
+                                      ENVIRONMENT_GUID, tuple(component_selection(mapping) for mapping in mappings),
+                                      "isolated-component-key")
+
+
+async def test_v2_configuration_is_explicit_target_free_and_cannot_move_to_another_environment(hass, config_entry):
+    existing, mapping, _ = configured_matter(hass, config_entry)
+    components = component_settings(mapping)
+    assert TelemetrySettings.from_dict(asdict(existing), TENANT).component_telemetry is None
+    saved = {**asdict(existing), "measurement_mappings": [], "component_telemetry": asdict(components)}
+    assert TelemetrySettings.from_dict(saved, TENANT).component_telemetry == components
+    assert components.device_key not in repr(components)
+    assert replace(components, device_key="isolated-new-key").fingerprint == components.fingerprint
+    assert replace(components, device_key="isolated-new-key").credential_hash != components.credential_hash
+    assert replace(components, source_generation_guid=DEVICE_GUID).fingerprint != components.fingerprint
+
+    with pytest.raises(ValueError, match="device_mismatch"):
+        TelemetrySettings.from_dict({**saved, "environment_guid": DEVICE_GUID}, TENANT)
+    with pytest.raises(ValueError, match="device_mismatch"):
+        TelemetrySettings.from_dict({**saved, "measurement_mappings": [asdict(mapping)]}, TENANT)
+    malformed = asdict(components)
+    malformed["selections"][0]["readings"][0]["asset_guid"] = ASSET_GUID
+    with pytest.raises(ValueError, match="invalid_mapping"):
+        TelemetrySettings.from_dict({**saved, "component_telemetry": malformed}, TENANT)
+
+
+async def test_v2_batch_combines_current_physical_devices_and_does_not_replace_an_unknown_value(hass, config_entry):
+    _, first, _ = configured_matter(hass, config_entry)
+    _, second, second_light = configured_matter(hass, config_entry, "fabric-node-2")
+    settings = component_settings(first, second)
+    now = dt_util.utcnow()
+    wire, partial = sample_component_batch(hass, settings, TENANT, now)
+    result = json.loads(wire)
+    assert not partial and len(result["observations"]) == 8
+    assert len(wire) < 60_000
+    assert result["sourceGenerationGuid"] == settings.source_generation_guid
+    assert {row["identity"]["stableHardwareId"] for row in result["observations"]} == {first.ha_device_id, second.ha_device_id}
+    assert {row["observedAt"] for row in result["observations"]} == {now.isoformat()}
+
+    hass.states.async_set(second_light.entity_id, "unknown")
+    wire, partial = sample_component_batch(hass, settings, TENANT, dt_util.utcnow())
+    result = json.loads(wire)
+    assert partial and len(result["observations"]) == 4
+    assert {row["identity"]["stableHardwareId"] for row in result["observations"]} == {first.ha_device_id}
 
 
 def configured(hass, config_entry):

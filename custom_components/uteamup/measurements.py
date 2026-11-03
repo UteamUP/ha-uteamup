@@ -4,43 +4,23 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from unicodedata import category
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 
 from .telemetry_config import (
-    MeasurementMapping, MeasurementSource, TelemetrySettings, compatible_meter, public_guid, source_unit,
+    MAX_COMPONENT_READINGS, ComponentMeasurementSelection, ComponentMeasurementSource, ComponentTelemetrySettings,
+    MeasurementMapping, MeasurementSource, TelemetrySettings, compatible_meter, component_registry_id, public_guid, source_unit,
 )
 from .telemetry_queue import QueuedEnvelope
 
 VACUUM_STATES = ("cleaning", "docked", "returning", "idle", "paused", "error")
-
-
-@dataclass(frozen=True)
-class ComponentMeasurementSource:
-    """A reviewed local Matter observation; it cannot name a CMMS target."""
-
-    source_registry_id: str
-    unit: str
-    true_state: str = ""
-    known_states: tuple[str, ...] = ()
-    source_attribute: str = "state"
-
-
+MAX_COMPONENT_BATCH_BYTES = 60_000
 _SourceReading = MeasurementSource | ComponentMeasurementSource
-
-
-@dataclass(frozen=True)
-class ComponentMeasurementSelection:
-    ha_device_id: str
-    anchor_registry_id: str
-    anchor_unique_id: str
-    readings: tuple[ComponentMeasurementSource, ...]
 
 
 def measurement_states(hass: HomeAssistant, entity: er.RegistryEntry) -> tuple[str, ...]:
@@ -200,32 +180,12 @@ def sample_measurements(hass: HomeAssistant, settings: TelemetrySettings, mappin
     return envelope, bool(unavailable)
 
 
-def _registry_id(value: str) -> str:
-    identifier = UUID(value)
-    if identifier.int == 0 or value not in {identifier.hex, str(identifier)}:
-        raise ValueError("invalid_registry_identity")
-    return value
-
-
 def _label(value: str | None, limit: int) -> str | None:
     if not value:
         return None
     clean = "".join(character for character in value if category(character) not in {"Cc", "Cf", "Cs"})
     # The receiver measures string length in UTF-16 code units. Preserve complete characters.
     return clean.encode("utf-16-le")[:limit * 2].decode("utf-16-le", errors="ignore") or None
-
-
-def _component_channel_attribute(reading: ComponentMeasurementSource) -> str:
-    if (not reading.unit or reading.unit != reading.unit.strip() or _label(reading.unit, 50) != reading.unit
-            or reading.source_attribute not in {"state", "availability", "brightness", "color_temp_kelvin"}
-            or (reading.source_attribute != "state" and (reading.true_state or reading.known_states))):
-        raise ValueError("invalid_mapping")
-    if reading.true_state or reading.known_states:
-        if (reading.unit != "0/1" or reading.known_states != ("on", "off")
-                or reading.true_state not in reading.known_states):
-            raise ValueError("invalid_mapping")
-        return f"state.{reading.true_state}"
-    return reading.source_attribute
 
 
 def _component_observation(hass: HomeAssistant, device: dr.DeviceEntry, anchor: er.RegistryEntry,
@@ -249,8 +209,8 @@ def _component_observation(hass: HomeAssistant, device: dr.DeviceEntry, anchor: 
     }
     return {
         "observationId": str(uuid4()),
-        "identity": {"namespace": "homeassistant.device-registry", "stableHardwareId": _registry_id(device.id)},
-        "channel": {"namespace": "homeassistant.entity-registry", "stableId": _registry_id(entity.id), "attribute": attribute},
+        "identity": {"namespace": "homeassistant.device-registry", "stableHardwareId": component_registry_id(device.id)},
+        "channel": {"namespace": "homeassistant.entity-registry", "stableId": component_registry_id(entity.id), "attribute": attribute},
         "observedAt": now.isoformat(), "value": value, "unit": reading.unit, "observationKind": "current_state_sample",
         "provenance": {"quality": "measured", "sourceStateUpdatedAt": state.last_updated.isoformat(),
                        "sourceReportedAt": state.last_reported.isoformat()},
@@ -258,15 +218,9 @@ def _component_observation(hass: HomeAssistant, device: dr.DeviceEntry, anchor: 
     }
 
 
-def sample_component_measurements(hass: HomeAssistant, selection: ComponentMeasurementSelection, *,
-                                  tenant_guid: str, source_guid: str, generation_guid: str,
-                                  now: datetime) -> tuple[bytes, bool]:
-    """Encode one V2 capture from current HA registry evidence, without choosing a fixture or meter."""
-    if now.utcoffset() != timedelta(0) or not 1 <= len(selection.readings) <= 64:
-        raise ValueError("invalid_mapping")
-    tenant, source, generation = map(public_guid, (tenant_guid, source_guid, generation_guid))
-    device = dr.async_get(hass).async_get(_registry_id(selection.ha_device_id))
-    anchor = er.async_get(hass).async_get(_registry_id(selection.anchor_registry_id))
+def _sample_component_observations(hass: HomeAssistant, selection: ComponentMeasurementSelection, now: datetime) -> list[dict]:
+    device = dr.async_get(hass).async_get(component_registry_id(selection.ha_device_id))
+    anchor = er.async_get(hass).async_get(component_registry_id(selection.anchor_registry_id))
     if (device is None or device.disabled_by is not None or anchor is None or anchor.disabled
             or anchor.platform != "matter" or anchor.device_id != device.id or anchor.unique_id != selection.anchor_unique_id):
         raise ValueError("device_mismatch")
@@ -275,7 +229,7 @@ def sample_component_measurements(hass: HomeAssistant, selection: ComponentMeasu
             or anchor_state.last_updated > now or anchor_state.last_reported > now):
         raise ValueError("unavailable")
 
-    channels = [(_registry_id(reading.source_registry_id), _component_channel_attribute(reading)) for reading in selection.readings]
+    channels = [(component_registry_id(reading.source_registry_id), reading.channel_attribute) for reading in selection.readings]
     if len(set(channels)) != len(channels):
         raise ValueError("invalid_mapping")
     observations = []
@@ -286,8 +240,58 @@ def sample_component_measurements(hass: HomeAssistant, selection: ComponentMeasu
             continue  # No substitute reading when the real source is unavailable or has moved.
     if not observations:
         raise ValueError("unavailable")
-    return json.dumps({
+    return observations
+
+
+def _encode_component_batch(tenant_guid: str, source_guid: str, generation_guid: str, now: datetime,
+                            observations: list[dict]) -> bytes:
+    tenant, source, generation = map(public_guid, (tenant_guid, source_guid, generation_guid))
+    envelope = {
         "schemaVersion": 2, "eventId": str(uuid4()), "tenantGuid": tenant,
         "sourceInstallationGuid": source, "sourceGenerationGuid": generation, "sampledAt": now.isoformat(),
         "observations": observations,
-    }, separators=(",", ":"), allow_nan=False).encode(), len(observations) != len(selection.readings)
+    }
+
+    def encode() -> bytes:
+        return json.dumps(envelope, separators=(",", ":"), allow_nan=False, ensure_ascii=False).encode()
+
+    payload = encode()
+    if len(payload) > MAX_COMPONENT_BATCH_BYTES:
+        # Hints are optional. The stable identity, value, units and clocks always stay intact.
+        envelope["observations"] = [{key: value for key, value in row.items() if key != "suggestions"} for row in observations]
+        payload = encode()
+    if len(payload) > MAX_COMPONENT_BATCH_BYTES:
+        raise ValueError("component_batch_too_large")
+    return payload
+
+
+def sample_component_measurements(hass: HomeAssistant, selection: ComponentMeasurementSelection, *,
+                                  tenant_guid: str, source_guid: str, generation_guid: str,
+                                  now: datetime) -> tuple[bytes, bool]:
+    """Encode one V2 capture from current HA registry evidence, without choosing a fixture or meter."""
+    if now.utcoffset() != timedelta(0) or not 1 <= len(selection.readings) <= 64:
+        raise ValueError("invalid_mapping")
+    observations = _sample_component_observations(hass, selection, now)
+    return _encode_component_batch(tenant_guid, source_guid, generation_guid, now, observations), len(observations) != len(selection.readings)
+
+
+def sample_component_batch(hass: HomeAssistant, settings: ComponentTelemetrySettings, tenant_guid: str,
+                           now: datetime) -> tuple[bytes, bool]:
+    """One collector delivers a bounded batch across physical devices using one capture clock."""
+    expected = sum(len(selection.readings) for selection in settings.selections)
+    if now.utcoffset() != timedelta(0) or not 1 <= expected <= MAX_COMPONENT_READINGS:
+        raise ValueError("invalid_mapping")
+    observations = []
+    for selection in settings.selections:
+        try:
+            observations.extend(_sample_component_observations(hass, selection, now))
+        except ValueError as error:
+            if str(error) not in {"unavailable", "device_mismatch"}:
+                raise
+    if not observations:
+        raise ValueError("unavailable")
+    if len({(row["identity"]["stableHardwareId"], row["channel"]["stableId"], row["channel"]["attribute"])
+            for row in observations}) != len(observations):
+        raise ValueError("invalid_mapping")
+    return (_encode_component_batch(tenant_guid, settings.source_installation_guid, settings.source_generation_guid, now, observations),
+            len(observations) != expected)

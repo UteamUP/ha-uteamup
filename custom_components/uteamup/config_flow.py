@@ -41,6 +41,7 @@ from .api import (
 from .const import (
     CONF_API_SECRET,
     CONF_ASSIGNEE_GUID,
+    CONF_COMPONENT_TELEMETRY,
     CONF_ENABLE_WEBHOOKS,
     CONF_ENABLE_TELEMETRY,
     CONF_DEVICE_KEY,
@@ -651,19 +652,26 @@ class UteamupOptionsFlow(MeasurementOptionsFlow, OptionsFlow):
                                       "position": str(len(self._client_links) + 1), "count": str(len(self._client_selected))})
 
     def _finish_telemetry(self) -> ConfigFlowResult:
+        prior = self.config_entry.options.get(CONF_TELEMETRY, {})
         if (not self._mappings and not self._network_mappings
-                and not self.config_entry.options.get(CONF_TELEMETRY, {}).get("measurement_mappings")):
+                and not prior.get("measurement_mappings") and not prior.get(CONF_COMPONENT_TELEMETRY)):
             return self.async_show_form(step_id="telemetry_network_devices", data_schema=vol.Schema({}),
                                         errors={"base": "no_devices"})
+        saved = {
+            **self._environment,
+            **{key: prior[key] for key in (CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN,
+                                            CONF_COMPONENT_TELEMETRY) if key in prior},
+            "mappings": [asdict(item) for item in self._mappings],
+            "network_mappings": [asdict(item) for item in self._network_mappings],
+            "measurement_mappings": prior.get("measurement_mappings", []),
+        }
+        if saved.get(CONF_COMPONENT_TELEMETRY) is not None:
+            try:
+                TelemetrySettings.from_dict(saved, self.config_entry.data[CONF_TENANT_GUID])
+            except (KeyError, TypeError, ValueError):
+                return self.async_show_form(step_id="telemetry_network_devices", data_schema=vol.Schema({}),
+                                            errors={"base": "invalid_mapping"})
         return self.async_create_entry(data={
             **self._options,
-            CONF_TELEMETRY: {
-                **self._environment,
-                **{key: self.config_entry.options.get(CONF_TELEMETRY, {})[key]
-                   for key in (CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN)
-                   if key in self.config_entry.options.get(CONF_TELEMETRY, {})},
-                "mappings": [asdict(item) for item in self._mappings],
-                "network_mappings": [asdict(item) for item in self._network_mappings],
-                "measurement_mappings": self.config_entry.options.get(CONF_TELEMETRY, {}).get("measurement_mappings", []),
-            },
+            CONF_TELEMETRY: saved,
         })

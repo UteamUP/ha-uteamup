@@ -20,6 +20,7 @@ CONF_ASSIGNEE_GUID: Final = "assignee_guid"
 CONF_ENABLE_TELEMETRY: Final = "enable_telemetry"
 CONF_TELEMETRY: Final = "telemetry"
 CONF_DEVICE_KEY: Final = "device_key"
+CONF_COMPONENT_TELEMETRY: Final = "component_telemetry"
 
 TELEMETRY_SAMPLE_SECONDS: Final = 60
 TELEMETRY_KEEPALIVE_SECONDS: Final = 600
