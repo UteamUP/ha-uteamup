@@ -20,7 +20,7 @@ from .test_telemetry_config import DEVICE, DEVICE_GUID, environment_response
 from .test_telemetry_options import renderable
 
 TOKEN = "home-assistant-intake-token-0123456789abcdef"
-ENDPOINT = "http://192.168.68.13:41080"
+ENDPOINT = "https://192.168.68.13:41080"
 
 
 @pytest.fixture(autouse=True)

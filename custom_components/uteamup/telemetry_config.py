@@ -75,7 +75,7 @@ def edge_bridge_endpoint(value: Any) -> str:
         valid_port = parsed.port is not None and 1024 <= parsed.port <= 65535
     except ValueError as error:
         raise ValueError("invalid_mapping") from error
-    if (not private or not valid_port or parsed.scheme not in {"http", "https"} or parsed.username or parsed.password
+    if (not private or not valid_port or parsed.scheme != "https" or "@" in parsed.netloc
             or parsed.path or parsed.query or parsed.fragment or any(character.isspace() for character in address)):
         raise ValueError("invalid_mapping")
     return address

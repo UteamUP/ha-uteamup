@@ -659,6 +659,9 @@ class UteamupOptionsFlow(MeasurementOptionsFlow, OptionsFlow):
             **self._options,
             CONF_TELEMETRY: {
                 **self._environment,
+                **{key: self.config_entry.options.get(CONF_TELEMETRY, {})[key]
+                   for key in (CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN)
+                   if key in self.config_entry.options.get(CONF_TELEMETRY, {})},
                 "mappings": [asdict(item) for item in self._mappings],
                 "network_mappings": [asdict(item) for item in self._network_mappings],
                 "measurement_mappings": self.config_entry.options.get(CONF_TELEMETRY, {}).get("measurement_mappings", []),

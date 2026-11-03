@@ -270,9 +270,9 @@ async def test_saved_matter_mapping_rejects_unsupported_attribute_or_unit(hass, 
         MeasurementMapping.from_dict(asdict(changed))
 
 
-@pytest.mark.parametrize("endpoint", ["http://127.0.0.1:41080", "http://8.8.8.8:41080",
+@pytest.mark.parametrize("endpoint", ["http://192.168.68.13:41080", "https://@192.168.68.13:41080", "http://127.0.0.1:41080", "http://8.8.8.8:41080",
     "http://collector.local:41080", "http://192.168.68.13:80", "http://192.168.68.13:99999",
-    "http://user:password@192.168.68.13:41080", "http://192.168.68.13:41080/other", "http://192.168.68.13:41080?secret=1"])
+    "http://user:password@192.168.68.13:41080", "https://192.168.68.13:41080/other", "https://192.168.68.13:41080?secret=1"])
 def test_edge_bridge_origin_is_an_explicit_private_lan_address(endpoint):
     with pytest.raises(ValueError, match="invalid_mapping"):
         edge_bridge_endpoint(endpoint)
@@ -281,7 +281,7 @@ def test_edge_bridge_origin_is_an_explicit_private_lan_address(endpoint):
 async def test_bridge_measurements_do_not_need_cloud_keys_on_home_assistant(hass, config_entry):
     settings, mapping, _ = configured_matter(hass, config_entry)
     settings = replace(settings, measurement_mappings=(replace(mapping, device_key=""),),
-                       edge_bridge_endpoint="http://192.168.68.13:41080",
+                       edge_bridge_endpoint="https://192.168.68.13:41080",
                        edge_bridge_token="ha-intake-token-12345678901234567890", edge_bridge_devices=(DEVICE_GUID,))
     assert TelemetrySettings.from_dict(asdict(settings), TENANT) == settings
     assert settings.edge_bridge_token not in repr(settings)

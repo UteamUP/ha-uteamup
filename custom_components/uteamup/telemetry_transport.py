@@ -13,6 +13,7 @@ from uuid import UUID
 import aiohttp
 
 from .telemetry_queue import QueuedEnvelope
+from .telemetry_config import edge_bridge_endpoint
 
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=20)
 MAX_ACK_BYTES = 16 * 1024
@@ -76,6 +77,10 @@ class TelemetryTransport:
         headers = {"X-Device-Key": device_key, "Content-Type": "application/json"}
         if bridged:
             if not self._bridge_endpoint or not self._bridge_token:
+                return DeliveryResult("configuration")
+            try:
+                edge_bridge_endpoint(self._bridge_endpoint)
+            except ValueError:
                 return DeliveryResult("configuration")
             try:
                 body = json.loads(payload)

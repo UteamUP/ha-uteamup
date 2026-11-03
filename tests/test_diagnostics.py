@@ -120,7 +120,7 @@ async def test_diagnostics_redact_nested_telemetry_identities_and_anonymize_sour
             CONF_TENANT_GUID: TENANT,
             "environment_guid": "private-environment-guid",
             "retry_nonce": "private-retry-nonce",
-            CONF_EDGE_BRIDGE_ENDPOINT: "http://192.168.68.13:41080",
+            CONF_EDGE_BRIDGE_ENDPOINT: "https://192.168.68.13:41080",
             CONF_EDGE_BRIDGE_TOKEN: "private-collector-token",
             CONF_EDGE_BRIDGE_DEVICES: ["private-device-route"],
             "mappings": [mapping],
