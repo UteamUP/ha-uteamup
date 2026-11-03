@@ -12,7 +12,7 @@ import pytest
 
 from custom_components.uteamup.telemetry_queue import QueuedEnvelope
 from custom_components.uteamup.telemetry_transport import (
-    TelemetryTransport, retry_after_seconds, retry_delay,
+    ComponentDeliveryTarget, TelemetryTransport, retry_after_seconds, retry_delay,
 )
 
 from .conftest import TENANT
@@ -29,6 +29,77 @@ def setup_transport(status=202, overrides=None, headers=None, raw=None):
     session.post.return_value.__aenter__ = AsyncMock(return_value=response)
     session.post.return_value.__aexit__ = AsyncMock(return_value=False)
     return TelemetryTransport(session, ENDPOINT), session, event
+
+
+def setup_component_transport(status=202, receipt=None, tail=b"", bridged=False):
+    _, session, event = setup_transport(status=status)
+    target = ComponentDeliveryTarget(TENANT, ENVIRONMENT_GUID, DEVICE_GUID, str(uuid4()), "isolated-component-source-key")
+    scope = {
+        "schemaVersion": 2, "eventId": event.event_id, "tenantGuid": target.tenant_guid,
+        "sourceInstallationGuid": target.source_guid, "sourceGenerationGuid": target.generation_guid,
+    }
+    captured_at = "2030-01-01T00:00:00Z"
+    observation = {
+        "observationId": str(uuid4()),
+        "identity": {"namespace": "homeassistant.device-registry", "stableHardwareId": uuid4().hex},
+        "channel": {"namespace": "homeassistant.entity-registry", "stableId": uuid4().hex, "attribute": "state.on"},
+        "observedAt": captured_at, "value": 1, "unit": "0/1", "observationKind": "current_state_sample",
+        "provenance": {"quality": "measured"},
+    }
+    payload = (" \n" + json.dumps({**scope, "sampledAt": captured_at, "observations": [observation]}) + "\n").encode()
+    event = replace(event, payload=payload)
+    acknowledgement = {
+        **scope, "receivedAt": "2030-01-01T00:00:00.1234567Z", "status": "accepted", "duplicate": False,
+        "projectionState": "queued", **(receipt or {}),
+    }
+    response = session.post.return_value.__aenter__.return_value
+    response.content.read.side_effect = [json.dumps(acknowledgement).encode(), tail, b""]
+    transport = TelemetryTransport(session, ENDPOINT, edge_bridge_devices=(DEVICE_GUID,) if bridged else ())
+    return transport, session, event, target
+
+
+@pytest.mark.parametrize("receipt", [{}, {"status": "duplicate", "duplicate": True, "projectionState": "pendingReview"}])
+async def test_v2_matches_exact_generation_and_leaves_the_queued_payload_unchanged(receipt):
+    transport, session, event, target = setup_component_transport(receipt=receipt)
+    assert (await transport.async_send_component(event, target)).outcome == "accepted"
+    assert session.post.call_args.args == (f"{ENDPOINT}/v2/telemetry/batch",)
+    assert session.post.call_args.kwargs["data"] is event.payload
+    assert session.post.call_args.kwargs["headers"] == {"X-Device-Key": target.source_key, "Content-Type": "application/json"}
+    assert session.post.call_args.kwargs["allow_redirects"] is False
+    assert session.post.call_args.kwargs["ssl"] is True
+    assert target.source_key not in repr(target)
+
+
+@pytest.mark.parametrize("bad_receipt,tail", [
+    ({"sourceGenerationGuid": str(uuid4())}, b""),
+    ({"tenantGuid": str(uuid4())}, b""),
+    ({"eventId": str(uuid4())}, b""),
+    ({"schemaVersion": 1}, b""),
+    ({"duplicate": True}, b""),
+    ({"receivedAt": "2030-01-01T00:00:00"}, b""),
+    ({}, b"another-response-fragment"),
+    ({}, b" " * 16385),
+])
+async def test_v2_never_consumes_wrong_scope_or_partial_receipts(bad_receipt, tail):
+    transport, session, event, target = setup_component_transport(receipt=bad_receipt, tail=tail)
+    assert (await transport.async_send_component(event, target)).outcome == "retrying"
+    session.post.assert_called_once()
+
+
+async def test_v2_never_reroutes_a_queued_event_to_a_different_environment_or_generation():
+    transport, session, event, target = setup_component_transport()
+    assert (await transport.async_send_component(event, replace(target, environment_guid=str(uuid4())))).outcome == "configuration"
+    assert (await transport.async_send_component(event, replace(target, generation_guid=str(uuid4())))).outcome == "mapping_changed"
+    session.post.assert_not_called()
+
+
+async def test_v2_redirect_does_not_fall_back_and_bridge_selected_source_cannot_send_directly():
+    transport, session, event, target = setup_component_transport(status=307)
+    assert (await transport.async_send_component(event, target)).outcome == "configuration"
+    session.post.assert_called_once()
+    transport, session, event, target = setup_component_transport(bridged=True)
+    assert (await transport.async_send_component(event, target)).outcome == "configuration"
+    session.post.assert_not_called()
 
 
 @pytest.mark.parametrize("ack", [{}, {"status": "duplicate", "duplicate": True}])

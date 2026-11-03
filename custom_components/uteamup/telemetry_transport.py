@@ -1,28 +1,38 @@
-"""The dedicated stamp's v1 contract, using only its narrow device credential."""
+"""Delivery to the dedicated stamp with exact, versioned acknowledgements."""
 
 from __future__ import annotations
 
 import json
 import math
 import random
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from uuid import UUID
 
 import aiohttp
 
 from .telemetry_queue import QueuedEnvelope
-from .telemetry_config import edge_bridge_endpoint
+from .telemetry_config import edge_bridge_endpoint, ingestion_endpoint, public_guid, valid_device_key
 
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=20)
 MAX_ACK_BYTES = 16 * 1024
+MAX_COMPONENT_PAYLOAD_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
 class DeliveryResult:
     outcome: str
     retry_after: float = 0
+
+
+@dataclass(frozen=True)
+class ComponentDeliveryTarget:
+    tenant_guid: str
+    environment_guid: str
+    source_guid: str
+    generation_guid: str
+    source_key: str = field(repr=False)
 
 
 def retry_after_seconds(value: str | None, now: datetime) -> float:
@@ -57,6 +67,46 @@ def _matching_ack(body: bytes, envelope: QueuedEnvelope, stage: str | None = Non
         )
     except (ValueError, KeyError, TypeError, AttributeError):
         return False
+
+
+def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate_field")
+    return result
+
+
+def _same_component_scope(body, envelope: QueuedEnvelope, target: ComponentDeliveryTarget) -> bool:
+    return (type(body["schemaVersion"]) is int and body["schemaVersion"] == 2
+            and public_guid(body["eventId"]) == public_guid(envelope.event_id)
+            and public_guid(body["tenantGuid"]) == public_guid(target.tenant_guid) == public_guid(envelope.tenant_guid)
+            and public_guid(body["sourceInstallationGuid"]) == public_guid(target.source_guid) == public_guid(envelope.device_guid)
+            and public_guid(body["sourceGenerationGuid"]) == public_guid(target.generation_guid))
+
+
+def _matching_component_ack(payload: bytes, envelope: QueuedEnvelope, target: ComponentDeliveryTarget) -> bool:
+    try:
+        body = json.loads(payload, object_pairs_hook=_strict_object)
+        if set(body) != {"schemaVersion", "eventId", "tenantGuid", "sourceInstallationGuid", "sourceGenerationGuid",
+                         "receivedAt", "status", "duplicate", "projectionState"}:
+            return False
+        return (_same_component_scope(body, envelope, target)
+                and body["status"] in {"accepted", "duplicate"}
+                and body["duplicate"] is (body["status"] == "duplicate")
+                and body["projectionState"] in {"queued", "pendingReview", "projected", "quarantined", "observedOnly"}
+                and datetime.fromisoformat(body["receivedAt"]).utcoffset() == timedelta(0))
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        return False
+
+
+async def _complete_ack(content: aiohttp.StreamReader) -> bytes | None:
+    body = bytearray()
+    while len(body) <= MAX_ACK_BYTES:
+        chunk = await content.read(MAX_ACK_BYTES + 1 - len(body))
+        if not chunk:
+            return bytes(body)
+        body.extend(chunk)
+    return None
 
 
 class TelemetryTransport:
@@ -112,4 +162,45 @@ class TelemetryTransport:
                 return DeliveryResult("payload_rejected")
         except (aiohttp.ClientError, TimeoutError):
             # Neither response bodies nor exception strings are safe to log with device credentials.
+            return DeliveryResult("retrying")
+
+    async def async_send_component(self, envelope: QueuedEnvelope, target: ComponentDeliveryTarget) -> DeliveryResult:
+        """Only an exact direct V2 receipt can consume a queued component event."""
+        try:
+            endpoint = ingestion_endpoint(self._endpoint)
+            if (public_guid(envelope.environment_guid) != public_guid(target.environment_guid)
+                    or public_guid(target.source_guid) in self._bridge_devices
+                    or not valid_device_key(target.source_key)):
+                return DeliveryResult("configuration")
+        except (TypeError, ValueError):
+            return DeliveryResult("configuration")
+        if not 0 < len(envelope.payload) <= MAX_COMPONENT_PAYLOAD_BYTES:
+            return DeliveryResult("payload_rejected")
+        try:
+            body = json.loads(envelope.payload, object_pairs_hook=_strict_object)
+            if not _same_component_scope(body, envelope, target):
+                return DeliveryResult("mapping_changed")
+        except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+            return DeliveryResult("payload_rejected")
+
+        try:
+            async with self._session.post(
+                f"{endpoint}/v2/telemetry/batch", data=envelope.payload,
+                headers={"X-Device-Key": target.source_key, "Content-Type": "application/json"},
+                timeout=REQUEST_TIMEOUT, ssl=True, allow_redirects=False,
+            ) as response:
+                delay = retry_after_seconds(response.headers.get("Retry-After"), datetime.now(UTC))
+                if response.status == 202:
+                    receipt = await _complete_ack(response.content)
+                    if receipt is not None and _matching_component_ack(receipt, envelope, target):
+                        return DeliveryResult("accepted")
+                    return DeliveryResult("retrying", delay)
+                if response.status in {408, 425, 429} or response.status >= 500:
+                    return DeliveryResult("retrying", delay)
+                if response.status in {401, 403}:
+                    return DeliveryResult("authentication")
+                if 300 <= response.status < 400 or response.status in {404, 405, 410}:
+                    return DeliveryResult("configuration")
+                return DeliveryResult("payload_rejected")
+        except (aiohttp.ClientError, TimeoutError):
             return DeliveryResult("retrying")
