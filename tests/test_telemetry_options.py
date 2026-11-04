@@ -13,13 +13,14 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from custom_components.uteamup.const import CONF_ENABLE_TELEMETRY, CONF_ENABLE_WEBHOOKS, CONF_TELEMETRY
+from custom_components.uteamup.const import CONF_COMPONENT_TELEMETRY, CONF_ENABLE_TELEMETRY, CONF_ENABLE_WEBHOOKS, CONF_TELEMETRY
 from custom_components.uteamup.api import UteamupForbiddenError
-from custom_components.uteamup.telemetry import SourceUnavailable, sample_envelope
+from custom_components.uteamup.telemetry import SourceUnavailable, UteamupTelemetry, sample_envelope
 from custom_components.uteamup.telemetry_config import TelemetrySettings, build_mapping, environment_settings
 
 from .conftest import BASE, TENANT, mock_login
 from .conftest import ASSET_GUID
+from .test_measurements import configured_matter
 from .test_telemetry_config import (
     ASSET_TYPE, ASSET_TYPE_GUID, ATTRIBUTES, DEVICE, DEVICE_GUID, DEVICE_KEY, ENDPOINT,
     NETWORK_ATTRIBUTES, NETWORK_DEVICE, NETWORK_DEVICE_GUID,
@@ -35,6 +36,81 @@ def no_setup():
 
 def renderable(result):
     return voluptuous_serialize.convert(result["data_schema"], custom_serializer=cv.custom_serializer)
+
+
+async def open_component_options(hass, config_entry, aioclient_mock, *, retired=False):
+    config_entry.add_to_hass(hass)
+    mock_login(aioclient_mock)
+    generation = str(uuid4())
+    aioclient_mock.get(f"{BASE}/api/iot/environment", json=environment_response())
+    aioclient_mock.get(f"{BASE}/api/iot/devices/{DEVICE_GUID}/source-generations", json=[{
+        "sourceInstallationGuid": DEVICE_GUID,
+        "sourceGenerationGuid": generation,
+        "sourceKind": "homeassistant",
+        "retiredAt": "2026-11-03T00:00:00Z" if retired else None,
+    }])
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        CONF_SCAN_INTERVAL: 120, CONF_ENABLE_WEBHOOKS: False, "configure_components": True,
+    })
+    assert result["step_id"] == "component_collector"
+    return result, generation
+
+
+async def test_component_options_confirm_exact_generation_and_preserve_queue_on_disable(hass, config_entry, aioclient_mock):
+    result, generation = await open_component_options(hass, config_entry, aioclient_mock)
+    _, mapping, light = configured_matter(hass, config_entry)
+    key = "isolated-native-component-key"
+    assert "password" in str(renderable(result))
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        "source_installation_guid": DEVICE_GUID, "source_generation_guid": generation, "device_key": key,
+    })
+    assert result["step_id"] == "component_sources"
+    assert "matter" in str(renderable(result))
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        "entities": [light.entity_id], "availability": True, "light_attributes": True,
+    })
+    assert result["step_id"] == "component_confirm"
+    assert result["description_placeholders"] == {"devices": "1", "readings": "4", "endpoint": ENDPOINT}
+    assert key not in str(renderable(result))
+    assert CONF_TELEMETRY not in config_entry.options
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    saved = TelemetrySettings.from_dict(dict(config_entry.options[CONF_TELEMETRY]), TENANT)
+    assert config_entry.options[CONF_ENABLE_TELEMETRY] is True
+    assert saved.component_telemetry.source_generation_guid == generation
+    assert saved.component_telemetry.selections[0].ha_device_id == mapping.ha_device_id
+    assert saved.component_telemetry.device_key == key
+    telemetry = UteamupTelemetry(hass, config_entry, saved)
+    await telemetry.async_sample_once()
+    queued = await telemetry.queue.async_next(dt_util.utcnow().timestamp())
+    assert queued is not None
+
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        CONF_SCAN_INTERVAL: 120, CONF_ENABLE_WEBHOOKS: False, "configure_components": True,
+    })
+    assert result["step_id"] == "component_collector" and key not in str(renderable(result))
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"disable_component_telemetry": True})
+    assert result["step_id"] == "component_disable"
+    assert CONF_COMPONENT_TELEMETRY in config_entry.options[CONF_TELEMETRY]
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert config_entry.options[CONF_ENABLE_TELEMETRY] is False
+    assert CONF_COMPONENT_TELEMETRY not in config_entry.options[CONF_TELEMETRY]
+    assert await telemetry.queue.async_next(dt_util.utcnow().timestamp()) == queued
+
+
+async def test_component_options_refuse_retired_generation_without_saving_a_key(hass, config_entry, aioclient_mock):
+    result, generation = await open_component_options(hass, config_entry, aioclient_mock, retired=True)
+    key = "isolated-retired-component-key"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        "source_installation_guid": DEVICE_GUID, "source_generation_guid": generation, "device_key": key,
+    })
+    assert result["step_id"] == "component_collector"
+    assert result["errors"] == {"base": "component_generation_missing"}
+    assert key not in str(renderable(result))
+    assert CONF_TELEMETRY not in config_entry.options
 
 
 async def begin(

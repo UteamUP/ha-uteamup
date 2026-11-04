@@ -86,6 +86,51 @@ def build_measurement_source(hass: HomeAssistant, entity: er.RegistryEntry, defi
     return MeasurementSource(entity.id, definition["attributeDefinitionGuid"], unit, true_state, states, source_attribute)
 
 
+def build_component_selections(hass: HomeAssistant, entity_ids: list[str], *, availability: bool,
+                               light_attributes: bool) -> tuple[ComponentMeasurementSelection, ...]:
+    """Turn explicit current Matter entity selections into independent, target-free channels."""
+    if not 1 <= len(entity_ids) <= MAX_COMPONENT_READINGS or len(set(entity_ids)) != len(entity_ids):
+        raise ValueError("invalid_component_selection")
+    registry = er.async_get(hass)
+    devices = dr.async_get(hass)
+    grouped: dict[str, list[er.RegistryEntry]] = {}
+    for entity_id in entity_ids:
+        entity = registry.async_get(entity_id)
+        if (entity is None or entity.disabled or entity.platform != "matter" or not entity.device_id
+                or entity.domain not in {"light", "switch", "binary_sensor", "sensor"}):
+            raise ValueError("invalid_component_selection")
+        device = devices.async_get(entity.device_id)
+        if device is None or device.disabled_by is not None:
+            raise ValueError("invalid_component_selection")
+        grouped.setdefault(device.id, []).append(entity)
+    if len(grouped) > 32:
+        raise ValueError("invalid_component_selection")
+
+    selections = []
+    for device_id, entities in grouped.items():
+        anchor = entities[0]
+        readings = []
+        for entity in entities:
+            states = measurement_states(hass, entity)
+            unit = measurement_unit(hass, entity)
+            if not unit or (states and states != ("on", "off")):
+                raise ValueError("invalid_component_selection")
+            readings.append(ComponentMeasurementSource(entity.id, unit, "on" if states else "", states))
+            if light_attributes:
+                readings.extend(ComponentMeasurementSource(entity.id, measurement_unit(hass, entity, attribute),
+                                                           source_attribute=attribute)
+                                for attribute in measurement_attributes(hass, entity)
+                                if attribute in {"brightness", "color_temp_kelvin"})
+        if availability:
+            readings.append(ComponentMeasurementSource(anchor.id, "0/1", source_attribute="availability"))
+        if len(readings) > 64:
+            raise ValueError("invalid_component_selection")
+        selections.append(ComponentMeasurementSelection(device_id, anchor.id, anchor.unique_id, tuple(readings)))
+    if sum(len(selection.readings) for selection in selections) > MAX_COMPONENT_READINGS:
+        raise ValueError("invalid_component_selection")
+    return tuple(selections)
+
+
 def _attribute_value(state: State, entity: er.RegistryEntry, reading: _SourceReading) -> float:
     if reading.source_attribute == "availability":
         if reading.unit != "0/1" or state.state == STATE_UNKNOWN:

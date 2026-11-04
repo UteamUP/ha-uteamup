@@ -60,6 +60,7 @@ from .coordinator import UteamupConfigEntry
 from .deco_clients import deco_clients, matching_assets, prepare_client_meters
 from .services import valid_guid
 from .measurement_flow import MeasurementOptionsFlow
+from .component_flow import ComponentOptionsFlow
 from .telemetry_config import (
     NETWORK_METRICS, POWER_BASES, SOURCE_DOMAINS, DecoClientMapping, NetworkTelemetryMapping, TelemetryMapping,
     build_mapping, build_network_mapping, compatible_meter, environment_settings,
@@ -163,7 +164,7 @@ class UteamupConfigFlow(ConfigFlow, domain=DOMAIN):
         return UteamupOptionsFlow()
 
 
-class UteamupOptionsFlow(MeasurementOptionsFlow, OptionsFlow):
+class UteamupOptionsFlow(ComponentOptionsFlow, MeasurementOptionsFlow, OptionsFlow):
     """Keep ordinary options compact; configure optional telemetry one device at a time."""
 
     def __init__(self) -> None:
@@ -193,10 +194,13 @@ class UteamupOptionsFlow(MeasurementOptionsFlow, OptionsFlow):
                 errors[CONF_ASSIGNEE_GUID] = "invalid_guid"
             else:
                 configure_measurements = user_input.pop("configure_measurements", False)
+                configure_components = user_input.pop("configure_components", False)
                 configure_edge_bridge = user_input.pop("configure_edge_bridge", False)
                 self._options = {**self.config_entry.options, **user_input}
                 if configure_edge_bridge:
                     return await self.async_step_edge_bridge()
+                if configure_components:
+                    return await self.async_step_component_collector()
                 if configure_measurements:
                     return await self.async_step_measurement_device()
                 if self._options.get(CONF_ENABLE_TELEMETRY, False):
@@ -215,6 +219,7 @@ class UteamupOptionsFlow(MeasurementOptionsFlow, OptionsFlow):
                     description={"suggested_value": options.get(CONF_ENABLE_TELEMETRY, False)},
                 ): cv.boolean,
                 vol.Optional("configure_measurements", default=False): cv.boolean,
+                vol.Optional("configure_components", default=False): cv.boolean,
                 vol.Optional("configure_edge_bridge", default=False): cv.boolean,
             }
         )

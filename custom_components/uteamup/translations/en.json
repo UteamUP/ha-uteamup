@@ -59,6 +59,7 @@
           "assignee_guid": "Only list work orders assigned to (user GUID)",
           "enable_telemetry": "Send readings to dedicated IoT",
           "configure_measurements": "Configure other measurements",
+          "configure_components": "Configure direct component telemetry",
           "configure_edge_bridge": "Configure EdgeBridge delivery"
         },
         "data_description": {
@@ -176,6 +177,36 @@
           "add_condition": "Add another reading from this source"
         }
       },
+      "component_collector": {
+        "title": "Connect a Home Assistant component collector",
+        "description": "Enter the currently enrolled Home Assistant collector and generation from UteamUP. Use its dedicated component ingestion key. This checks enrollment before anything is sent.",
+        "data": {
+          "source_installation_guid": "Collector GUID",
+          "source_generation_guid": "Source generation GUID",
+          "device_key": "Component ingestion key",
+          "disable_component_telemetry": "Disable direct component telemetry"
+        },
+        "data_description": {
+          "device_key": "Leave blank only to keep the saved key for the same collector, generation and environment."
+        }
+      },
+      "component_sources": {
+        "title": "Select Matter readings",
+        "description": "Select the Matter entities to capture. The default is their reported state or numeric value. Existing telemetry mappings cannot send the same physical device a second time.",
+        "data": {
+          "entities": "Matter entities",
+          "availability": "Include each selected device’s reported availability",
+          "light_attributes": "Include supported light brightness and color temperature"
+        }
+      },
+      "component_confirm": {
+        "title": "Review direct component telemetry",
+        "description": "Capture {readings} selected readings from {devices} Matter devices and send them to {endpoint}. Review the reported hardware and channels in UteamUP before linking them to inventory. Confirming enables this collector and keeps its existing queue."
+      },
+      "component_disable": {
+        "title": "Stop direct component telemetry",
+        "description": "This stops capturing for this collector. Its existing queued records remain on this Home Assistant instance and can be reviewed later. Other telemetry stays as configured."
+      },
       "measurement_confirm": {
         "title": "Confirm the asset connection",
         "description": "Send {count} selected measurements from {source} to {device}, asset {asset}, through {endpoint}. This enables delivery and keeps all other mappings. Only source readings are sent; no tank volume, refill deadline or fault meaning is inferred. Change the mapping later through Configure other measurements."
@@ -218,6 +249,11 @@
       "invalid_value": "A selected source does not currently contain a valid finite, nonnegative value or online state.",
       "unavailable": "A required source is unavailable or unknown. Restore it, then reopen Configure.",
       "invalid_mapping": "Enter a valid device ingestion key and complete the required reading settings.",
+      "component_generation_missing": "UteamUP could not verify an active Home Assistant generation for this collector. Check both GUIDs and enrollment.",
+      "component_not_allowed": "The current company API key and its owner need IOT.Environment.Read and IOT.View to verify this collector.",
+      "invalid_component_selection": "Choose registered Matter entities with supported readings. Select up to 32 devices and 96 readings.",
+      "invalid_component_settings": "Check both collector GUIDs, its component ingestion key and any existing mapping for the selected devices.",
+      "component_configuration_changed": "The collector, selected entities or options changed during review. Reopen Configure to review current settings.",
       "client_setup_not_allowed": "The tenant key cannot read or link these assets/types. It needs Asset.View, Asset.Update, AssetType.View and AssetType.Create; ask the tenant administrator to check the key. Existing telemetry settings are retained.",
       "client_setup_failed": "Could not finish linking clients. Existing settings are retained. Some types or attributes may already have been added; retry reuses them. Check the connection and whether the asset was changed by another user.",
       "ambiguous_client_type": "Several custom types are named Deco client telemetry. Resolve the duplicate in UteamUP before retrying.",

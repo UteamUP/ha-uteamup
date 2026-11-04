@@ -8,6 +8,7 @@ import json
 import time
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 import aiohttp
 
@@ -196,6 +197,16 @@ class UteamupClient:
     async def async_get_iot_environment(self) -> dict[str, Any]:
         """Read the tenant's dedicated ingestion endpoint, without provisioning it."""
         return await self._request("GET", "/api/iot/environment")
+
+    async def async_get_iot_source_generations(self, source_guid: str) -> list[dict[str, Any]]:
+        """Read enrollment for an existing collector using the current tenant API key."""
+        source = UUID(source_guid)
+        if source.int == 0:
+            raise ValueError("invalid_guid")
+        result = await self._request("GET", f"/api/iot/devices/{source}/source-generations")
+        if not isinstance(result, list) or len(result) > 500 or any(not isinstance(row, dict) for row in result):
+            raise UteamupApiError("Could not verify the enrolled collector generation")
+        return result
 
     async def async_get_iot_devices(self) -> list[dict[str, Any]]:
         """Read existing devices visible to this tenant API key."""
