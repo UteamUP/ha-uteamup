@@ -165,6 +165,13 @@ class TelemetryQueue:
             )
         await self._async_transaction(block)
 
+    async def async_quarantine_event(self, envelope: QueuedEnvelope, reason: str) -> None:
+        """Retain one refused event without stopping the current collector generation."""
+        def quarantine(connection: sqlite3.Connection) -> None:
+            connection.execute("UPDATE events SET quarantine_reason=? WHERE event_id=? AND device_guid=?",
+                               (reason, envelope.event_id, envelope.device_guid))
+        await self._async_transaction(quarantine)
+
     async def async_blocked_devices(self) -> dict[str, str]:
         return await self._async_transaction(lambda connection: {
             row["device_guid"]: row["blocked_reason"]

@@ -4,6 +4,7 @@ from dataclasses import asdict, replace
 from datetime import timedelta
 import hashlib
 import json
+from unittest.mock import AsyncMock
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
@@ -19,6 +20,7 @@ from custom_components.uteamup.telemetry_config import (
     MeasurementMapping, MeasurementSource, TelemetrySettings,
 )
 from custom_components.uteamup.telemetry_config import edge_bridge_endpoint
+from custom_components.uteamup.telemetry_transport import DeliveryResult
 from .conftest import ASSET_GUID, ATTRIBUTE_GUID, TENANT
 from .test_telemetry_config import DEVICE_GUID, DEVICE_KEY, ENDPOINT, ENVIRONMENT_GUID, ENERGY_GUID
 
@@ -154,6 +156,62 @@ async def test_v2_batch_combines_current_physical_devices_and_does_not_replace_a
     result = json.loads(wire)
     assert partial and len(result["observations"]) == 4
     assert {row["identity"]["stableHardwareId"] for row in result["observations"]} == {first.ha_device_id}
+
+
+async def test_v2_durable_queue_retries_original_bytes_after_restart_and_consumes_only_acceptance(hass, config_entry, monkeypatch):
+    base, mapping, _ = configured_matter(hass, config_entry)
+    collector = component_settings(mapping)
+    settings = replace(base, measurement_mappings=(), component_telemetry=collector)
+    initial = UteamupTelemetry(hass, config_entry, settings)
+    await initial.async_sample_once()
+    await initial.async_sample_once()
+    assert (await initial.queue.async_stats()).pending == 1  # Repeated state did not enqueue a new event.
+    original = await initial.queue.async_next(dt_util.utcnow().timestamp())
+    assert original is not None
+
+    restarted = UteamupTelemetry(hass, config_entry, settings)
+    direct = AsyncMock(side_effect=[DeliveryResult("retrying"), DeliveryResult("accepted")])
+    legacy = AsyncMock()
+    monkeypatch.setattr(restarted.transport, "async_send_component", direct)
+    monkeypatch.setattr(restarted.transport, "async_send", legacy)
+    monkeypatch.setattr("custom_components.uteamup.telemetry.retry_delay", lambda *_: 0)
+    assert await restarted.async_send_once()
+    assert (await restarted.queue.async_stats()).pending == 1
+    assert await restarted.async_send_once()
+    assert (await restarted.queue.async_stats()).pending == 0
+    queued = [call.args[0] for call in direct.await_args_list]
+    assert all(item.event_id == original.event_id and item.payload == original.payload for item in queued)
+    assert [item.attempts for item in queued] == [0, 1]
+    assert all(call.args[1].generation_guid == collector.source_generation_guid for call in direct.await_args_list)
+    legacy.assert_not_awaited()
+
+
+async def test_v2_old_generation_is_quarantined_without_blocking_the_new_generation(hass, config_entry, monkeypatch):
+    base, mapping, _ = configured_matter(hass, config_entry)
+    prior = component_settings(mapping)
+    settings = replace(base, measurement_mappings=(), component_telemetry=prior)
+    initial = UteamupTelemetry(hass, config_entry, settings)
+    await initial.async_sample_once()
+
+    current = replace(prior, source_generation_guid=DEVICE_GUID)
+    restarted = UteamupTelemetry(hass, config_entry, replace(settings, component_telemetry=current))
+    direct = AsyncMock(return_value=DeliveryResult("accepted"))
+    legacy = AsyncMock()
+    monkeypatch.setattr(restarted.transport, "async_send_component", direct)
+    monkeypatch.setattr(restarted.transport, "async_send", legacy)
+    assert await restarted.async_send_once()
+    direct.assert_not_awaited()
+    stats = await restarted.queue.async_stats()
+    assert stats.quarantined == 1 and stats.blocked_devices == 0
+
+    await restarted.async_sample_once()
+    assert await restarted.async_send_once()
+    assert direct.await_count == 1
+    assert direct.await_args.args[1].generation_guid == current.source_generation_guid
+    assert json.loads(direct.await_args.args[0].payload)["sourceGenerationGuid"] == current.source_generation_guid
+    legacy.assert_not_awaited()
+    stats = await restarted.queue.async_stats()
+    assert stats.pending == 0 and stats.quarantined == 1
 
 
 def configured(hass, config_entry):

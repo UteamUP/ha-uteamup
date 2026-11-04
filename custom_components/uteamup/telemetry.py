@@ -32,8 +32,8 @@ from .telemetry_config import (
     normalize_mac,
 )
 from .telemetry_queue import QueuedEnvelope, QueueStats, TelemetryQueue
-from .telemetry_transport import TelemetryTransport, retry_delay
-from .measurements import sample_measurements
+from .telemetry_transport import ComponentDeliveryTarget, TelemetryTransport, retry_delay
+from .measurements import sample_component_batch, sample_measurements
 
 if TYPE_CHECKING:
     from .coordinator import UteamupConfigEntry
@@ -45,21 +45,34 @@ CUMULATIVE_UNITS = frozenset({"Wh", "kWh"})
 
 def content_fingerprint(payload: bytes) -> str:
     """What a sample says, ignoring identities, capture times and energy counters that always advance."""
+    body = json.loads(payload)
+    component = body.get("schemaVersion") == 2
+    excluded = ({"eventId", "sampledAt", "observationId", "observedAt", "sourceStateUpdatedAt", "sourceReportedAt"}
+                if component else {"eventId", "pointId"})
+
     def strip(value: Any) -> Any:
         if isinstance(value, dict):
             return {
                 key: strip(item) for key, item in value.items()
-                if key not in {"eventId", "pointId"} and not key.endswith(("observedAt", "ObservedAt", "UpdatedAt"))
+                if key not in excluded and (component or not key.endswith(("observedAt", "ObservedAt", "UpdatedAt")))
             }
         if isinstance(value, list):
             return [strip(item) for item in value]
         return value
 
-    body = json.loads(payload)
-    for point in body.get("points", []):
-        if point.get("unit") in CUMULATIVE_UNITS:
-            point.pop("value", None)
+    if not component:
+        for point in body.get("points", []):
+            if point.get("unit") in CUMULATIVE_UNITS:
+                point.pop("value", None)
     return json.dumps(strip(body), sort_keys=True, separators=(",", ":"))
+
+
+def _is_component_envelope(envelope: QueuedEnvelope) -> bool:
+    try:
+        body = json.loads(envelope.payload)
+        return isinstance(body, dict) and body.get("schemaVersion") == 2
+    except (ValueError, RecursionError):
+        return False
 
 
 def _estimate_parameters(attributes: Mapping[str, Any]) -> dict[str, float]:
@@ -267,6 +280,18 @@ class UteamupTelemetry:
         self._mappings = {
             item.device_guid: item for item in (*settings.mappings, *settings.network_mappings, *settings.measurement_mappings)
         }
+        component = settings.component_telemetry
+        self._component_target = None
+        self._component_fingerprint = None
+        if component is not None:
+            if (component.environment_guid != settings.environment_guid
+                    or component.source_installation_guid in self._mappings
+                    or component.source_installation_guid in settings.edge_bridge_devices):
+                raise ValueError("device_mismatch")
+            self._component_target = ComponentDeliveryTarget(settings.tenant_guid, component.environment_guid,
+                                                             component.source_installation_guid, component.source_generation_guid,
+                                                             component.device_key)
+            self._component_fingerprint = component.fingerprint
         self._tasks: list[asyncio.Task] = []
         self._stopped = False
         self._queue_full = False
@@ -275,12 +300,12 @@ class UteamupTelemetry:
 
     async def async_start(self) -> None:
         try:
-            await self.queue.async_configure(
-                {item.device_guid: hashlib.sha256(self.settings.edge_bridge_token.encode()).hexdigest()
-                 if item.device_guid in self.settings.edge_bridge_devices else item.credential_hash
-                 for item in self._mappings.values()},
-                self.settings.retry_nonce,
-            )
+            credentials = {item.device_guid: hashlib.sha256(self.settings.edge_bridge_token.encode()).hexdigest()
+                           if item.device_guid in self.settings.edge_bridge_devices else item.credential_hash
+                           for item in self._mappings.values()}
+            if component := self.settings.component_telemetry:
+                credentials[component.source_installation_guid] = component.credential_hash
+            await self.queue.async_configure(credentials, self.settings.retry_nonce)
             await self._async_update_health()
         except (sqlite3.Error, OSError):
             self._mark_storage_error()
@@ -343,8 +368,29 @@ class UteamupTelemetry:
             self.health.sources[mapping.device_guid] = "partial" if partial else "available"
             if mapping.device_guid not in blocked:
                 overflow = not await self._async_enqueue_changed(envelope) or overflow
+        if self._component_target is not None:
+            overflow = not await self._async_sample_components(blocked) or overflow
         self._queue_full = overflow
         await self._async_update_health()
+
+    async def _async_sample_components(self, blocked: dict[str, str]) -> bool:
+        component = self.settings.component_telemetry
+        fingerprint = self._component_fingerprint
+        if component is None or fingerprint is None:
+            return True
+        source = component.source_installation_guid
+        try:
+            payload, partial = sample_component_batch(self.hass, component, self.settings.tenant_guid, dt_util.utcnow())
+        except ValueError as error:
+            reason = str(error)
+            self.health.sources[source] = reason if reason in {"unavailable", "device_mismatch", "component_batch_too_large"} else "invalid_mapping"
+            return True
+        self.health.sources[source] = "partial" if partial else "available"
+        if source in blocked:
+            return True
+        envelope = QueuedEnvelope(json.loads(payload)["eventId"], self.settings.tenant_guid, source,
+                                  component.environment_guid, fingerprint, payload)
+        return await self._async_enqueue_changed(envelope)
 
     async def _async_enqueue_changed(self, envelope: QueuedEnvelope) -> bool:
         """Repeat an unchanged sample only as a keepalive: identical minutes spend the tenant's daily quota.
@@ -422,15 +468,25 @@ class UteamupTelemetry:
         envelope = await self.queue.async_next(now.timestamp())
         if envelope is None:
             return False
+        component = self._component_target if self._component_target and envelope.device_guid == self._component_target.source_guid else None
         mapping = self._mappings.get(envelope.device_guid)
+        expected = self._component_fingerprint if component else mapping.fingerprint if mapping else None
         if (
-            mapping is None or envelope.tenant_guid != self.settings.tenant_guid
+            expected is None or envelope.tenant_guid != self.settings.tenant_guid
             or envelope.environment_guid != self.settings.environment_guid
-            or envelope.mapping_fingerprint != mapping.fingerprint
+            or envelope.mapping_fingerprint != expected
         ):
-            await self.queue.async_block(envelope, "mapping_changed")
+            if component or _is_component_envelope(envelope):
+                await self.queue.async_quarantine_event(envelope, "mapping_changed")
+            else:
+                await self.queue.async_block(envelope, "mapping_changed")
         else:
-            result = await self.transport.async_send(envelope, mapping.device_key)
+            if component:
+                result = await self.transport.async_send_component(envelope, component)
+            elif mapping is not None:
+                result = await self.transport.async_send(envelope, mapping.device_key)
+            else:
+                raise RuntimeError("A matched telemetry mapping is required")
             if result.outcome == "accepted":
                 await self.queue.async_acknowledge(envelope.event_id)
                 self.health.last_success = dt_util.utcnow()
@@ -438,6 +494,8 @@ class UteamupTelemetry:
                 await self.queue.async_defer(
                     envelope, dt_util.utcnow().timestamp() + retry_delay(envelope.attempts, result.retry_after),
                 )
+            elif component and result.outcome in {"payload_rejected", "mapping_changed"}:
+                await self.queue.async_quarantine_event(envelope, result.outcome)
             else:
                 await self.queue.async_block(envelope, result.outcome)
         await self._async_update_health()
