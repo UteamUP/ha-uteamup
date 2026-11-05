@@ -180,15 +180,23 @@ def _handler(entry: UteamupConfigEntry):
         if not signature_valid(entry.data[CONF_WEBHOOK_SECRET], body, request.headers.get(SIGNATURE_HEADER)):
             return web.Response(status=401)
         delivery = request.headers.get(DELIVERY_HEADER)
-        if delivery and delivery in seen:
+        body_digest = f"sha256:{hashlib.sha256(body).hexdigest()}"
+        if (delivery and delivery in seen) or body_digest in seen:
             return web.Response(status=200)
         try:
             payload = json.loads(body)
         except ValueError:
             return web.Response(status=400)
+        if not isinstance(payload, dict):
+            return web.Response(status=400)
+        payload_event = payload.get("event")
+        header_event = request.headers.get(EVENT_HEADER)
+        if payload_event and header_event and payload_event != header_event:
+            return web.Response(status=400)
         if delivery:
             seen.append(delivery)
-        event = payload.get("event") or request.headers.get(EVENT_HEADER)
+        seen.append(body_digest)
+        event = payload_event or header_event
         hass.bus.async_fire(
             EVENT_UTEAMUP,
             {"config_entry_id": entry.entry_id, "event": event, "delivery_id": delivery, "data": payload.get("data")},

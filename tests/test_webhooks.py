@@ -87,6 +87,17 @@ async def test_signed_delivery_fires_one_event(hass: HomeAssistant, hass_client_
 
     assert (await client.post(url, data=body, headers=headers)).status == 200
     assert (await client.post(url, data=body, headers=headers)).status == 200
+    # Replaying the exact same signed body with a rotated unsigned delivery header is also deduplicated.
+    assert (await client.post(url, data=body, headers={**headers, "X-UteamUP-Delivery": "delivery-2"})).status == 200
+    # Mismatched unsigned X-UteamUP-Event header vs signed payload.event is rejected.
+    mismatch_body = json.dumps({"event": "workorder.created", "data": {"guid": "y"}}).encode()
+    mismatch_headers = {
+        "X-UteamUP-Signature": _sign(webhook_entry.data[CONF_WEBHOOK_SECRET], mismatch_body),
+        "X-UteamUP-Delivery": "delivery-3",
+        "X-UteamUP-Event": "test.ping",
+        "Content-Type": "application/json",
+    }
+    assert (await client.post(url, data=mismatch_body, headers=mismatch_headers)).status == 400
     await hass.async_block_till_done()
 
     assert len(events) == 1
