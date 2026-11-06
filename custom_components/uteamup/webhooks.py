@@ -173,7 +173,8 @@ async def async_remove_webhook(hass: HomeAssistant, entry: UteamupConfigEntry, c
 
 
 def _handler(entry: UteamupConfigEntry):
-    seen: deque[str] = deque(maxlen=SEEN_DELIVERIES)
+    seen_deliveries: deque[str] = deque(maxlen=SEEN_DELIVERIES)
+    seen_digests: deque[str] = deque(maxlen=SEEN_DELIVERIES)
 
     async def handle(hass: HomeAssistant, webhook_id: str, request: web.Request) -> web.Response:
         body = await request.read() if hasattr(request, "read") else await request.content.read()
@@ -181,7 +182,7 @@ def _handler(entry: UteamupConfigEntry):
             return web.Response(status=401)
         delivery = request.headers.get(DELIVERY_HEADER)
         body_digest = f"sha256:{hashlib.sha256(body).hexdigest()}"
-        if (delivery and delivery in seen) or body_digest in seen:
+        if (delivery and delivery in seen_deliveries) or body_digest in seen_digests:
             return web.Response(status=200)
         try:
             payload = json.loads(body)
@@ -190,13 +191,15 @@ def _handler(entry: UteamupConfigEntry):
         if not isinstance(payload, dict):
             return web.Response(status=400)
         payload_event = payload.get("event")
+        if not isinstance(payload_event, str) or not payload_event.strip():
+            return web.Response(status=400)
         header_event = request.headers.get(EVENT_HEADER)
-        if payload_event and header_event and payload_event != header_event:
+        if header_event and payload_event != header_event:
             return web.Response(status=400)
         if delivery:
-            seen.append(delivery)
-        seen.append(body_digest)
-        event = payload_event or header_event
+            seen_deliveries.append(delivery)
+        seen_digests.append(body_digest)
+        event = payload_event
         hass.bus.async_fire(
             EVENT_UTEAMUP,
             {"config_entry_id": entry.entry_id, "event": event, "delivery_id": delivery, "data": payload.get("data")},

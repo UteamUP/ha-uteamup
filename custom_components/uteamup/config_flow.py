@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from collections.abc import Mapping
 from dataclasses import asdict, replace
 from typing import Any
@@ -95,7 +96,10 @@ class UteamupConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _validate(self, data: dict[str, Any], errors: dict[str, str]) -> str | None:
         # Validated here, not in the schema: the frontend cannot render a cv.url validator.
         try:
-            cv.url(data[CONF_URL])
+            validated_url = cv.url(data[CONF_URL])
+            parsed_url = urllib.parse.urlsplit(validated_url)
+            if parsed_url.scheme != "https" and (parsed_url.hostname or "").lower() not in {"localhost", "127.0.0.1", "::1"}:
+                raise vol.Invalid("HTTPS is required for non-loopback UteamUP endpoints")
         except vol.Invalid:
             errors[CONF_URL] = "invalid_url"
             return None

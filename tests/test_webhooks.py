@@ -98,6 +98,15 @@ async def test_signed_delivery_fires_one_event(hass: HomeAssistant, hass_client_
         "Content-Type": "application/json",
     }
     assert (await client.post(url, data=mismatch_body, headers=mismatch_headers)).status == 400
+    # Signed body missing payload.event cannot be overridden via unsigned X-UteamUP-Event header.
+    missing_event_body = json.dumps({"data": {"guid": "z"}}).encode()
+    missing_event_headers = {
+        "X-UteamUP-Signature": _sign(webhook_entry.data[CONF_WEBHOOK_SECRET], missing_event_body),
+        "X-UteamUP-Delivery": "delivery-4",
+        "X-UteamUP-Event": "test.ping",
+        "Content-Type": "application/json",
+    }
+    assert (await client.post(url, data=missing_event_body, headers=missing_event_headers)).status == 400
     await hass.async_block_till_done()
 
     assert len(events) == 1
