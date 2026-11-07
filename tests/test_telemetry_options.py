@@ -156,10 +156,13 @@ async def test_complete_mapping_flow_keeps_secret_out_of_form_defaults(hass, con
 
 
 async def test_energy_mapping_edit_preserves_the_reviewed_edgebridge_route(hass, config_entry, aioclient_mock):
-    from custom_components.uteamup.const import CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN
+    from custom_components.uteamup.const import (
+        CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT, CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN,
+    )
     result = await begin(hass, config_entry, aioclient_mock)
     bridge = {CONF_EDGE_BRIDGE_DEVICES: [DEVICE_GUID], CONF_EDGE_BRIDGE_ENDPOINT: "https://192.168.68.13:41080",
-              CONF_EDGE_BRIDGE_TOKEN: "fixture-home-assistant-intake-token-1234567890"}
+              CONF_EDGE_BRIDGE_TOKEN: "fixture-home-assistant-intake-token-1234567890",
+              CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT: "12" * 32}
     hass.config_entries.async_update_entry(config_entry, options={CONF_TELEMETRY: bridge})
     *_, inputs = register_sources(hass, config_entry)
     result = await hass.config_entries.options.async_configure(result["flow_id"], {"devices": [DEVICE_GUID]})
@@ -169,6 +172,7 @@ async def test_energy_mapping_edit_preserves_the_reviewed_edgebridge_route(hass,
     saved = config_entry.options[CONF_TELEMETRY]
     assert {key: saved[key] for key in bridge} == bridge
     assert TelemetrySettings.from_dict(saved, TENANT).edge_bridge_devices == (DEVICE_GUID,)
+    assert TelemetrySettings.from_dict(saved, TENANT).edge_bridge_certificate_fingerprint == "12" * 32
 
 
 async def test_measured_socket_can_be_selected_and_saved_without_an_estimate_profile(hass, config_entry, aioclient_mock):

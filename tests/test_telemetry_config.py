@@ -300,6 +300,22 @@ async def test_cached_settings_remain_tenant_bound(hass, config_entry):
         TelemetrySettings.from_dict({**saved, CONF_TENANT_GUID: DEVICE_GUID}, TENANT)
 
 
+async def test_saved_bridge_pin_is_revalidated_after_restart(hass, config_entry):
+    *_, inputs = register_sources(hass, config_entry)
+    saved = {
+        **environment_settings(environment_response(), TENANT),
+        "mappings": [asdict(build_mapping(hass, DEVICE, ATTRIBUTES, inputs))],
+        "edge_bridge_devices": [DEVICE_GUID],
+        "edge_bridge_endpoint": "https://192.168.68.13:41080",
+        "edge_bridge_token": "fixture-home-assistant-intake-token-1234567890",
+        "edge_bridge_certificate_fingerprint": ":".join(["AB"] * 32),
+    }
+    assert TelemetrySettings.from_dict(saved, TENANT).edge_bridge_certificate_fingerprint == "ab" * 32
+    for invalid in ["ab" * 20, "z" * 64, "ab" * 31, None]:
+        with pytest.raises(ValueError, match="invalid_mapping"):
+            TelemetrySettings.from_dict({**saved, "edge_bridge_certificate_fingerprint": invalid}, TENANT)
+
+
 async def test_deco_mapping_round_trip_preserves_energy_fingerprint(hass, config_entry):
     *_, energy_inputs = register_sources(hass, config_entry)
     *_, network_inputs = register_deco_sources(hass, config_entry)

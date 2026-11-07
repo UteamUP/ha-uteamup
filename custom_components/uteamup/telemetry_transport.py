@@ -13,7 +13,7 @@ from uuid import UUID
 import aiohttp
 
 from .telemetry_queue import QueuedEnvelope
-from .telemetry_config import edge_bridge_endpoint, ingestion_endpoint, public_guid, valid_device_key
+from .telemetry_config import edge_bridge_certificate_fingerprint, edge_bridge_endpoint, ingestion_endpoint, public_guid, valid_device_key
 
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=20)
 MAX_ACK_BYTES = 16 * 1024
@@ -113,23 +113,29 @@ class TelemetryTransport:
     """Use the reviewed cloud or LAN route; never redirect credentials or fall back between routes."""
 
     def __init__(self, session: aiohttp.ClientSession, endpoint: str, *, edge_bridge_endpoint: str = "",
-                 edge_bridge_token: str = "", edge_bridge_devices: tuple[str, ...] = ()) -> None:
+                 edge_bridge_token: str = "", edge_bridge_devices: tuple[str, ...] = (),
+                 edge_bridge_certificate_fingerprint: str = "") -> None:
         self._session = session
         self._endpoint = endpoint
         self._bridge_endpoint = edge_bridge_endpoint
         self._bridge_token = edge_bridge_token
         self._bridge_devices = frozenset(edge_bridge_devices)
+        self._bridge_certificate_fingerprint = edge_bridge_certificate_fingerprint
 
     async def async_send(self, envelope: QueuedEnvelope, device_key: str) -> DeliveryResult:
         bridged = envelope.device_guid in self._bridge_devices
         endpoint = f"{self._endpoint}/v1/telemetry/batch"
         payload = envelope.payload
         headers = {"X-Device-Key": device_key, "Content-Type": "application/json"}
+        tls_verification: bool | aiohttp.Fingerprint = True
         if bridged:
             if not self._bridge_endpoint or not self._bridge_token:
                 return DeliveryResult("configuration")
             try:
                 edge_bridge_endpoint(self._bridge_endpoint)
+                fingerprint = edge_bridge_certificate_fingerprint(self._bridge_certificate_fingerprint)
+                if fingerprint:
+                    tls_verification = aiohttp.Fingerprint(bytes.fromhex(fingerprint))
             except ValueError:
                 return DeliveryResult("configuration")
             try:
@@ -144,7 +150,7 @@ class TelemetryTransport:
         try:
             async with self._session.post(
                 endpoint, data=payload, headers=headers,
-                timeout=REQUEST_TIMEOUT, ssl=True, allow_redirects=False,
+                timeout=REQUEST_TIMEOUT, ssl=tls_verification, allow_redirects=False,
             ) as response:
                 delay = retry_after_seconds(response.headers.get("Retry-After"), datetime.now(UTC))
                 if response.status == 202:

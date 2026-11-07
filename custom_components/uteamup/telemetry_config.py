@@ -15,8 +15,8 @@ from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, STATE_UNAVAILABLE, STA
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from .const import (CONF_COMPONENT_TELEMETRY, CONF_DEVICE_KEY, CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT,
-                    CONF_EDGE_BRIDGE_TOKEN, CONF_TENANT_GUID)
+from .const import (CONF_COMPONENT_TELEMETRY, CONF_DEVICE_KEY, CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT,
+                    CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN, CONF_TENANT_GUID)
 
 SOURCE_DOMAINS = ("light", "switch")
 POWER_BASES = ("estimated", "measured")
@@ -82,6 +82,18 @@ def edge_bridge_endpoint(value: Any) -> str:
             or parsed.path or parsed.query or parsed.fragment or any(character.isspace() for character in address)):
         raise ValueError("invalid_mapping")
     return address
+
+
+def edge_bridge_certificate_fingerprint(value: Any) -> str:
+    """Accept a complete SHA-256 certificate fingerprint copied from the collector."""
+    if not isinstance(value, str):
+        raise ValueError("invalid_mapping")
+    if not value:
+        return ""
+    fingerprint = value.lower().replace(":", "")
+    if len(fingerprint) != 64 or any(character not in "0123456789abcdef" for character in fingerprint):
+        raise ValueError("invalid_mapping")
+    return fingerprint
 
 
 def normalize_mac(value: Any) -> str:
@@ -429,6 +441,7 @@ class TelemetrySettings:
     edge_bridge_endpoint: str = ""
     edge_bridge_token: str = field(default="", repr=False)
     edge_bridge_devices: tuple[str, ...] = ()
+    edge_bridge_certificate_fingerprint: str = ""
     component_telemetry: ComponentTelemetrySettings | None = None
 
     @classmethod
@@ -441,7 +454,8 @@ class TelemetrySettings:
         bridge_devices = tuple(public_guid(value) for value in data.get(CONF_EDGE_BRIDGE_DEVICES, ()))
         bridge_endpoint = str(data.get(CONF_EDGE_BRIDGE_ENDPOINT, ""))
         bridge_token = str(data.get(CONF_EDGE_BRIDGE_TOKEN, ""))
-        if bridge_devices or bridge_endpoint or bridge_token:
+        bridge_fingerprint = edge_bridge_certificate_fingerprint(data.get(CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT, ""))
+        if bridge_devices or bridge_endpoint or bridge_token or bridge_fingerprint:
             bridge_endpoint = edge_bridge_endpoint(bridge_endpoint)
             if (not bridge_devices or len(bridge_devices) > 1000 or len(set(bridge_devices)) != len(bridge_devices)
                     or len(bridge_token) < 32 or not valid_device_key(bridge_token)):
@@ -517,6 +531,7 @@ class TelemetrySettings:
             edge_bridge_endpoint=bridge_endpoint,
             edge_bridge_token=bridge_token,
             edge_bridge_devices=bridge_devices,
+            edge_bridge_certificate_fingerprint=bridge_fingerprint,
             component_telemetry=components,
         )
 

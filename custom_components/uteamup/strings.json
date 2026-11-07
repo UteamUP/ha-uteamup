@@ -224,11 +224,13 @@
         "data": {
           "devices": "Devices delivered through EdgeBridge",
           "edge_bridge_endpoint": "Collector origin on the private LAN",
-          "edge_bridge_token": "Dedicated Home Assistant intake token"
+          "edge_bridge_token": "Dedicated Home Assistant intake token",
+          "edge_bridge_certificate_fingerprint": "Collector certificate SHA-256 fingerprint"
         },
         "data_description": {
-          "edge_bridge_endpoint": "For example http://192.168.68.13:41080. Use a literal private LAN address and an explicit port.",
-          "edge_bridge_token": "Use the dedicated telemetry intake token, not a UPSense device key. Leave blank to keep the saved token."
+          "edge_bridge_endpoint": "For example https://192.168.68.13:41080. Use a literal private LAN address and an explicit port.",
+          "edge_bridge_token": "Use the dedicated telemetry intake token, not a UPSense device key. Leave blank to keep the saved token.",
+          "edge_bridge_certificate_fingerprint": "For a private collector certificate, copy its complete SHA-256 fingerprint from the trusted service console. Update it when replacing the certificate. Leave blank to use the standard trusted certificate authorities."
         }
       }
     },

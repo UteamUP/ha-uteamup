@@ -176,6 +176,49 @@ async def test_edge_bridge_handoff_uses_separate_token_and_preserves_original_en
     assert kwargs["allow_redirects"] is False
 
 
+async def test_certificate_pin_is_scoped_to_the_selected_bridge_request():
+    _, session, event = setup_transport(overrides={"stage": "edgebridge_intake"})
+    event = replace(event, payload=b'{"observedAt":"2030-01-01T00:00:00Z"}')
+    fingerprint = "12" * 32
+    transport = TelemetryTransport(session, ENDPOINT, edge_bridge_endpoint="https://192.168.68.13:41080",
+                                   edge_bridge_token="ha-intake-test-token-1234567890123456",
+                                   edge_bridge_devices=(DEVICE_GUID,), edge_bridge_certificate_fingerprint=fingerprint)
+    assert (await transport.async_send(event, DEVICE_KEY)).outcome == "accepted"
+    verification = session.post.call_args.kwargs["ssl"]
+    assert isinstance(verification, aiohttp.Fingerprint)
+    assert verification.fingerprint == bytes.fromhex(fingerprint)
+    assert session.post.call_args.kwargs["allow_redirects"] is False
+
+    session.post.reset_mock()
+    direct = TelemetryTransport(session, ENDPOINT, edge_bridge_certificate_fingerprint=fingerprint)
+    await direct.async_send(event, DEVICE_KEY)
+    assert session.post.call_args.kwargs["ssl"] is True
+    assert session.post.call_args.kwargs["headers"]["X-Device-Key"] == DEVICE_KEY
+
+
+async def test_bridge_pin_mismatch_retries_the_same_route_without_fallback():
+    _, session, event = setup_transport()
+    event = replace(event, payload=b'{"observedAt":"2030-01-01T00:00:00Z"}')
+    session.post.return_value.__aenter__.side_effect = aiohttp.ServerFingerprintMismatch(
+        bytes.fromhex("12" * 32), bytes.fromhex("34" * 32), "192.168.68.13", 41080)
+    transport = TelemetryTransport(session, ENDPOINT, edge_bridge_endpoint="https://192.168.68.13:41080",
+                                   edge_bridge_token="ha-intake-test-token-1234567890123456",
+                                   edge_bridge_devices=(DEVICE_GUID,), edge_bridge_certificate_fingerprint="12" * 32)
+    assert (await transport.async_send(event, DEVICE_KEY)).outcome == "retrying"
+    session.post.assert_called_once()
+    assert session.post.call_args.args == ("https://192.168.68.13:41080/v1/intake/telemetry",)
+
+
+@pytest.mark.parametrize("fingerprint", ["12" * 20, "12" * 31, "g" * 64, " " + "12" * 32])
+async def test_invalid_bridge_pin_sends_no_request(fingerprint):
+    _, session, event = setup_transport()
+    transport = TelemetryTransport(session, ENDPOINT, edge_bridge_endpoint="https://192.168.68.13:41080",
+                                   edge_bridge_token="ha-intake-test-token-1234567890123456",
+                                   edge_bridge_devices=(DEVICE_GUID,), edge_bridge_certificate_fingerprint=fingerprint)
+    assert (await transport.async_send(event, DEVICE_KEY)).outcome == "configuration"
+    session.post.assert_not_called()
+
+
 @pytest.mark.parametrize("status,stage,expected", [(503, "edgebridge_intake", "retrying"),
     (202, "cloud", "retrying"), (401, "edgebridge_intake", "authentication"),
     (307, "edgebridge_intake", "configuration")])

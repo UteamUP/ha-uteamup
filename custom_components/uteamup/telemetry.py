@@ -275,7 +275,8 @@ class UteamupTelemetry:
         self.transport = TelemetryTransport(async_get_clientsession(hass, verify_ssl=True), settings.endpoint,
                                             edge_bridge_endpoint=settings.edge_bridge_endpoint,
                                             edge_bridge_token=settings.edge_bridge_token,
-                                            edge_bridge_devices=settings.edge_bridge_devices)
+                                            edge_bridge_devices=settings.edge_bridge_devices,
+                                            edge_bridge_certificate_fingerprint=settings.edge_bridge_certificate_fingerprint)
         self.signal = f"{DOMAIN}_{entry.entry_id}_telemetry_health"
         self._mappings = {
             item.device_guid: item for item in (*settings.mappings, *settings.network_mappings, *settings.measurement_mappings)

@@ -62,6 +62,7 @@ QUICK_REPORT_SEVERITIES: Final = ("low", "medium", "high", "critical")
 CONF_EDGE_BRIDGE_ENDPOINT: Final = "edge_bridge_endpoint"
 CONF_EDGE_BRIDGE_TOKEN: Final = "edge_bridge_token"
 CONF_EDGE_BRIDGE_DEVICES: Final = "edge_bridge_devices"
+CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT: Final = "edge_bridge_certificate_fingerprint"
 
 # Events UteamUP delivers that Home Assistant users are likely to automate on.
 WEBHOOK_EVENTS: Final = (

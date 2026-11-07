@@ -47,6 +47,7 @@ from .const import (
     CONF_ENABLE_TELEMETRY,
     CONF_DEVICE_KEY,
     CONF_EDGE_BRIDGE_DEVICES,
+    CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT,
     CONF_EDGE_BRIDGE_ENDPOINT,
     CONF_EDGE_BRIDGE_TOKEN,
     CONF_TELEMETRY,
@@ -65,7 +66,7 @@ from .component_flow import ComponentOptionsFlow
 from .telemetry_config import (
     NETWORK_METRICS, POWER_BASES, SOURCE_DOMAINS, DecoClientMapping, NetworkTelemetryMapping, TelemetryMapping,
     build_mapping, build_network_mapping, compatible_meter, environment_settings,
-    mapping_source_choices, network_source_choices, edge_bridge_endpoint, valid_device_key, TelemetrySettings,
+    mapping_source_choices, network_source_choices, edge_bridge_certificate_fingerprint, edge_bridge_endpoint, valid_device_key, TelemetrySettings,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -245,15 +246,18 @@ class UteamupOptionsFlow(ComponentOptionsFlow, MeasurementOptionsFlow, OptionsFl
                 if len(set(selected)) != len(selected) or any(value not in devices for value in selected):
                     raise ValueError("invalid_mapping")
                 saved = {**old, **environment}
-                for key in (CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN):
+                for key in (CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN,
+                            CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT):
                     saved.pop(key, None)
                 if selected:
                     endpoint = edge_bridge_endpoint(user_input.get(CONF_EDGE_BRIDGE_ENDPOINT, ""))
                     token = user_input.get(CONF_EDGE_BRIDGE_TOKEN, "").strip() or old.get(CONF_EDGE_BRIDGE_TOKEN, "")
+                    fingerprint = edge_bridge_certificate_fingerprint(user_input.get(
+                        CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT, old.get(CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT, "")))
                     if len(token) < 32 or not valid_device_key(token):
                         raise ValueError("invalid_mapping")
                     saved.update({CONF_EDGE_BRIDGE_DEVICES: selected, CONF_EDGE_BRIDGE_ENDPOINT: endpoint,
-                                  CONF_EDGE_BRIDGE_TOKEN: token})
+                                  CONF_EDGE_BRIDGE_TOKEN: token, CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT: fingerprint})
                 TelemetrySettings.from_dict(saved, self.config_entry.data[CONF_TENANT_GUID])
                 return self.async_create_entry(data={**self._options, CONF_TELEMETRY: saved})
         except UteamupForbiddenError:
@@ -271,6 +275,8 @@ class UteamupOptionsFlow(ComponentOptionsFlow, MeasurementOptionsFlow, OptionsFl
             vol.Optional(CONF_EDGE_BRIDGE_ENDPOINT, default=defaults.get(CONF_EDGE_BRIDGE_ENDPOINT, "")): TextSelector(
                 TextSelectorConfig(type=TextSelectorType.URL)),
             vol.Optional(CONF_EDGE_BRIDGE_TOKEN): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+            vol.Optional(CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT,
+                         default=defaults.get(CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT, "")): TextSelector(),
         }))
 
     async def async_step_telemetry_devices(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
