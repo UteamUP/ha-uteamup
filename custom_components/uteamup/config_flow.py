@@ -675,7 +675,7 @@ class UteamupOptionsFlow(ComponentOptionsFlow, MeasurementOptionsFlow, OptionsFl
         saved = {
             **self._environment,
             **{key: prior[key] for key in (CONF_EDGE_BRIDGE_DEVICES, CONF_EDGE_BRIDGE_ENDPOINT, CONF_EDGE_BRIDGE_TOKEN,
-                                            CONF_COMPONENT_TELEMETRY) if key in prior},
+                                            CONF_EDGE_BRIDGE_CERTIFICATE_FINGERPRINT, CONF_COMPONENT_TELEMETRY) if key in prior},
             "mappings": [asdict(item) for item in self._mappings],
             "network_mappings": [asdict(item) for item in self._network_mappings],
             "measurement_mappings": prior.get("measurement_mappings", []),
