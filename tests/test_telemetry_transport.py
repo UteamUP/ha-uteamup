@@ -232,6 +232,23 @@ async def test_edge_bridge_failure_never_falls_back_to_cloud(status, stage, expe
     assert session.post.call_args.args[0].startswith("https://192.168.68.13:41080/")
 
 
+@pytest.mark.parametrize("age,expected", [(timedelta(minutes=8), "accepted"), (timedelta(minutes=10), "stale")])
+async def test_bridge_replay_outside_its_window_is_not_sent(age, expected):
+    _, session, event = setup_transport(overrides={"stage": "edgebridge_intake"})
+    event = replace(event, payload=json.dumps({"observedAt": (datetime.now(UTC) - age).isoformat()}).encode())
+    transport = TelemetryTransport(session, ENDPOINT, edge_bridge_endpoint="https://192.168.68.13:41080",
+                                   edge_bridge_token="ha-intake-test-token-1234567890123456", edge_bridge_devices=(DEVICE_GUID,))
+    assert (await transport.async_send(event, DEVICE_KEY)).outcome == expected
+    assert session.post.called is (expected == "accepted")
+
+
+async def test_direct_route_still_sends_an_old_replay():
+    _, session, event = setup_transport()
+    event = replace(event, payload=json.dumps({"observedAt": "2020-01-01T00:00:00+00:00"}).encode())
+    assert (await TelemetryTransport(session, ENDPOINT).async_send(event, DEVICE_KEY)).outcome == "accepted"
+    session.post.assert_called_once()
+
+
 async def test_unselected_devices_retain_their_reviewed_direct_route():
     _, session, event = setup_transport()
     transport = TelemetryTransport(session, ENDPOINT, edge_bridge_endpoint="https://192.168.68.13:41080",

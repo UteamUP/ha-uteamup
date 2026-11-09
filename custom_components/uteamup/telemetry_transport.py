@@ -18,6 +18,8 @@ from .telemetry_config import edge_bridge_certificate_fingerprint, edge_bridge_e
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=20)
 MAX_ACK_BYTES = 16 * 1024
 MAX_COMPONENT_PAYLOAD_BYTES = 1024 * 1024
+# EdgeBridge refuses telemetry more than ten minutes from its clock; one minute is left for clock skew.
+EDGE_BRIDGE_MAX_AGE = timedelta(minutes=9)
 
 
 @dataclass(frozen=True)
@@ -140,11 +142,15 @@ class TelemetryTransport:
                 return DeliveryResult("configuration")
             try:
                 body = json.loads(payload)
+                stale = datetime.now(UTC) - datetime.fromisoformat(body["observedAt"]) > EDGE_BRIDGE_MAX_AGE
                 payload = json.dumps({"source": "homeassistant", "kind": "telemetry",
                                       "observedAt": body["observedAt"], "envelope": body},
                                      separators=(",", ":"), allow_nan=False).encode()
             except (ValueError, KeyError, TypeError):
                 return DeliveryResult("payload_rejected")
+            if stale:
+                # A replay the bridge would refuse must not be sent, or its 400 blocks the whole device.
+                return DeliveryResult("stale")
             endpoint = f"{self._bridge_endpoint}/v1/intake/telemetry"
             headers = {"Authorization": f"Bearer {self._bridge_token}", "Content-Type": "application/json"}
         try:
