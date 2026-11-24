@@ -5,3 +5,6 @@ __pycache__/
 .coverage
 *.tar.gz
 *.tar.gz.*
+
+# Paperclip attachment staging (never commit live run payload)
+.paperclip-inbound/
