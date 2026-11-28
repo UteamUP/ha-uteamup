@@ -110,8 +110,14 @@ class UteamupClient:
             body["tenantGuid"] = self._tenant_guid
         try:
             async with self._session.post(
-                f"{self._base_url}/api/auth/apikey-login", json=body, timeout=REQUEST_TIMEOUT
+                f"{self._base_url}/api/auth/apikey-login",
+                json=body,
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
             ) as response:
+                if 300 <= response.status < 400:
+                    # Following the redirect would replay the API key and secret to the new target.
+                    raise UteamupConnectionError(f"Login was redirected to HTTP {response.status}")
                 if response.status == 429:
                     raise UteamupRateLimitError(_retry_after(response))
                 if response.status == 400:
@@ -158,7 +164,11 @@ class UteamupClient:
                 data=form,
                 headers=headers,
                 timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
             ) as response:
+                if 300 <= response.status < 400:
+                    # A redirect would replay the bearer token and the request body to the new target.
+                    raise UteamupConnectionError(f"{method} {path} was redirected to HTTP {response.status}")
                 if response.status == 401 and retry_auth:
                     self._token = None
                     return await self._request(
