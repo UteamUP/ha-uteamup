@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from typing import Self
+
 import pytest
 
 from homeassistant.core import HomeAssistant
@@ -12,6 +15,7 @@ from custom_components.uteamup.api import (
     UteamupApiError,
     UteamupAuthError,
     UteamupClient,
+    UteamupConnectionError,
     UteamupForbiddenError,
     UteamupNotFoundError,
     UteamupPlanError,
@@ -23,6 +27,73 @@ from .conftest import API_KEY, API_SECRET, BASE, TENANT, WORK_ORDER_GUID, make_t
 
 def _client(hass: HomeAssistant) -> UteamupClient:
     return UteamupClient(async_get_clientsession(hass), BASE, API_KEY, API_SECRET)
+
+
+class _FakeResponse:
+    """The bare minimum of an aiohttp response that the client uses."""
+
+    def __init__(self, status: int, body: bytes = b"", headers: dict[str, str] | None = None) -> None:
+        self.status = status
+        self.headers = headers or {}
+        self._body = body
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def text(self) -> str:
+        return self._body.decode()
+
+    async def json(self) -> dict:
+        return json.loads(self._body)
+
+
+class _RecordingSession:
+    """A session stand-in that records how the client asked for each request."""
+
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self._responses = responses
+        self.calls: list[dict] = []
+
+    def post(self, url: str, **kwargs: object) -> _FakeResponse:
+        self.calls.append(kwargs)
+        return self._responses.pop(0)
+
+    def request(self, method: str, url: str, **kwargs: object) -> _FakeResponse:
+        self.calls.append(kwargs)
+        return self._responses.pop(0)
+
+
+async def test_login_never_follows_a_redirect() -> None:
+    session = _RecordingSession(
+        [_FakeResponse(307, headers={"Location": "https://elsewhere.example.test/login"})]
+    )
+    client = UteamupClient(session, BASE, API_KEY, API_SECRET)
+
+    with pytest.raises(UteamupConnectionError):
+        await client.async_login()
+
+    # Following the redirect would replay the API key and secret to the redirect target.
+    assert session.calls[0]["allow_redirects"] is False
+
+
+async def test_a_redirected_call_is_a_connection_error() -> None:
+    token = json.dumps({"accessToken": make_token()}).encode()
+    session = _RecordingSession(
+        [
+            _FakeResponse(200, token),
+            _FakeResponse(308, headers={"Location": "https://elsewhere.example.test/stock"}),
+        ]
+    )
+    client = UteamupClient(session, BASE, API_KEY, API_SECRET)
+
+    with pytest.raises(UteamupConnectionError):
+        await client.async_get_stock_alert_summary()
+
+    # The bearer token and the request body must not travel to the redirect target.
+    assert session.calls[1]["allow_redirects"] is False
 
 
 async def test_login_reads_the_tenant_from_the_token(hass: HomeAssistant, aioclient_mock: AiohttpClientMocker) -> None:

@@ -7,7 +7,9 @@ import hmac
 import json
 import logging
 import secrets
-from collections import deque
+import time
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from aiohttp import web
 
@@ -33,7 +35,13 @@ _LOGGER = logging.getLogger(__name__)
 SIGNATURE_HEADER = "X-UteamUP-Signature"
 EVENT_HEADER = "X-UteamUP-Event"
 DELIVERY_HEADER = "X-UteamUP-Delivery"
-SEEN_DELIVERIES = 256
+
+# UteamUP stamps every delivery with the moment it was dispatched and retries a failed delivery
+# after 30 s and then after 5 min, so the oldest delivery it still considers deliverable is
+# 5 min 30 s old. The window stays above that horizon, otherwise a receiver that was briefly
+# unreachable would lose the last attempt, while a captured delivery can no longer be replayed
+# for ever.
+MAX_DELIVERY_AGE = timedelta(minutes=10)
 
 
 def signature_valid(secret: str, body: bytes, header: str | None) -> bool:
@@ -42,6 +50,61 @@ def signature_valid(secret: str, body: bytes, header: str | None) -> bool:
         return False
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, header.removeprefix("sha256="))
+
+
+def delivery_time(payload: dict[str, Any]) -> datetime | None:
+    """Read the dispatch time UteamUP signs into every delivery envelope."""
+    value = payload.get("timestamp")
+    if not isinstance(value, str) or not value:
+        return None
+    # System.Text.Json writes the UTC time with up to seven fractional digits and a trailing Z.
+    text = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def within_window(timestamp: datetime | None, now: datetime | None = None) -> bool:
+    """A delivery is only acceptable while its signed dispatch time is inside the window."""
+    if timestamp is None:
+        return False
+    moment = now if now is not None else datetime.now(UTC)
+    return abs((moment - timestamp).total_seconds()) <= MAX_DELIVERY_AGE.total_seconds()
+
+
+class SeenDeliveries:
+    """Remembers deliveries for the whole replay window, so a retry inside it never fires twice.
+
+    Entries expire by age and not by count: a busy tenant must not push an unexpired delivery out
+    of the window and make a captured copy of it replayable again.
+    """
+
+    def __init__(self, max_age: timedelta) -> None:
+        self._max_age = max_age
+        self._seen: dict[str, float] = {}
+
+    def _expire(self, now: float) -> None:
+        cutoff = now - self._max_age.total_seconds()
+        for key in [key for key, seen_at in self._seen.items() if seen_at < cutoff]:
+            del self._seen[key]
+
+    def contains(self, key: str | None) -> bool:
+        if not key:
+            return False
+        now = time.monotonic()
+        self._expire(now)
+        return key in self._seen
+
+    def add(self, key: str | None) -> None:
+        if not key:
+            return
+        now = time.monotonic()
+        self._seen[key] = now
+        self._expire(now)
 
 
 def _issue(hass: HomeAssistant, entry: UteamupConfigEntry, key: str | None) -> None:
@@ -173,8 +236,8 @@ async def async_remove_webhook(hass: HomeAssistant, entry: UteamupConfigEntry, c
 
 
 def _handler(entry: UteamupConfigEntry):
-    seen_deliveries: deque[str] = deque(maxlen=SEEN_DELIVERIES)
-    seen_digests: deque[str] = deque(maxlen=SEEN_DELIVERIES)
+    seen_deliveries = SeenDeliveries(MAX_DELIVERY_AGE)
+    seen_digests = SeenDeliveries(MAX_DELIVERY_AGE)
 
     async def handle(hass: HomeAssistant, webhook_id: str, request: web.Request) -> web.Response:
         body = await request.read() if hasattr(request, "read") else await request.content.read()
@@ -182,7 +245,8 @@ def _handler(entry: UteamupConfigEntry):
             return web.Response(status=401)
         delivery = request.headers.get(DELIVERY_HEADER)
         body_digest = f"sha256:{hashlib.sha256(body).hexdigest()}"
-        if (delivery and delivery in seen_deliveries) or body_digest in seen_digests:
+        # A delivery already handled is never fired twice, however old it has become by now.
+        if seen_deliveries.contains(delivery) or seen_digests.contains(body_digest):
             return web.Response(status=200)
         try:
             payload = json.loads(body)
@@ -196,9 +260,14 @@ def _handler(entry: UteamupConfigEntry):
         header_event = request.headers.get(EVENT_HEADER)
         if header_event and payload_event != header_event:
             return web.Response(status=400)
-        if delivery:
-            seen_deliveries.append(delivery)
-        seen_digests.append(body_digest)
+        if not within_window(delivery_time(payload)):
+            # Without this a captured delivery could be replayed for ever.
+            _LOGGER.warning(
+                "Refused a UteamUP webhook delivery outside the %s freshness window", MAX_DELIVERY_AGE
+            )
+            return web.Response(status=401)
+        seen_deliveries.add(delivery)
+        seen_digests.add(body_digest)
         event = payload_event
         hass.bus.async_fire(
             EVENT_UTEAMUP,

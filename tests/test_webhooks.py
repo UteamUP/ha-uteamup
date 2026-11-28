@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import sys
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from types import SimpleNamespace
 
@@ -27,7 +28,8 @@ from custom_components.uteamup.const import (
     DOMAIN,
     EVENT_UTEAMUP,
 )
-from custom_components.uteamup.webhooks import signature_valid
+from custom_components.uteamup import webhooks
+from custom_components.uteamup.webhooks import MAX_DELIVERY_AGE, SeenDeliveries, signature_valid
 
 from .conftest import BASE, mock_login, mock_reads, setup_entry
 
@@ -36,6 +38,11 @@ SUBSCRIPTION = "88888888-8888-4888-8888-888888888888"
 
 def _sign(secret: str, body: bytes) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _stamped(moment: datetime) -> str:
+    """Write a timestamp the way UteamUP's System.Text.Json writes one."""
+    return moment.isoformat().replace("+00:00", "Z")
 
 
 def test_signature_check() -> None:
@@ -77,7 +84,9 @@ async def test_setup_registers_a_subscription_for_the_external_url(
 async def test_signed_delivery_fires_one_event(hass: HomeAssistant, hass_client_no_auth, webhook_entry) -> None:
     events = async_capture_events(hass, EVENT_UTEAMUP)
     client = await hass_client_no_auth()
-    body = json.dumps({"event": "workorder.completed", "data": {"guid": "x"}}).encode()
+    body = json.dumps(
+        {"event": "workorder.completed", "timestamp": _stamped(datetime.now(UTC)), "data": {"guid": "x"}}
+    ).encode()
     headers = {
         "X-UteamUP-Signature": _sign(webhook_entry.data[CONF_WEBHOOK_SECRET], body),
         "X-UteamUP-Delivery": "delivery-1",
@@ -125,6 +134,107 @@ async def test_unsigned_or_forged_delivery_is_refused(hass: HomeAssistant, hass_
     assert (await client.post(url, data=body, headers={"X-UteamUP-Signature": _sign("guess", body)})).status == 401
     await hass.async_block_till_done()
     assert events == []
+
+
+async def test_a_captured_delivery_is_refused_once_it_is_outside_the_window(
+    hass: HomeAssistant, hass_client_no_auth, webhook_entry
+) -> None:
+    events = async_capture_events(hass, EVENT_UTEAMUP)
+    client = await hass_client_no_auth()
+    url = f"/api/webhook/{webhook_entry.data[CONF_WEBHOOK_ID]}"
+    old = _stamped(datetime.now(UTC) - MAX_DELIVERY_AGE - timedelta(minutes=1))
+    body = json.dumps({"event": "workorder.completed", "timestamp": old, "data": {"guid": "x"}}).encode()
+    headers = {
+        "X-UteamUP-Signature": _sign(webhook_entry.data[CONF_WEBHOOK_SECRET], body),
+        "X-UteamUP-Delivery": "delivery-old",
+        "Content-Type": "application/json",
+    }
+
+    assert (await client.post(url, data=body, headers=headers)).status == 401
+    await hass.async_block_till_done()
+    assert events == []
+
+
+async def test_a_delivery_dated_in_the_future_is_refused(
+    hass: HomeAssistant, hass_client_no_auth, webhook_entry
+) -> None:
+    events = async_capture_events(hass, EVENT_UTEAMUP)
+    client = await hass_client_no_auth()
+    url = f"/api/webhook/{webhook_entry.data[CONF_WEBHOOK_ID]}"
+    ahead = _stamped(datetime.now(UTC) + MAX_DELIVERY_AGE + timedelta(minutes=1))
+    body = json.dumps({"event": "workorder.completed", "timestamp": ahead, "data": {"guid": "x"}}).encode()
+    headers = {
+        "X-UteamUP-Signature": _sign(webhook_entry.data[CONF_WEBHOOK_SECRET], body),
+        "X-UteamUP-Delivery": "delivery-ahead",
+        "Content-Type": "application/json",
+    }
+
+    assert (await client.post(url, data=body, headers=headers)).status == 401
+    await hass.async_block_till_done()
+    assert events == []
+
+
+async def test_a_delivery_without_a_signed_timestamp_is_refused(
+    hass: HomeAssistant, hass_client_no_auth, webhook_entry
+) -> None:
+    events = async_capture_events(hass, EVENT_UTEAMUP)
+    client = await hass_client_no_auth()
+    url = f"/api/webhook/{webhook_entry.data[CONF_WEBHOOK_ID]}"
+    body = json.dumps({"event": "workorder.completed", "data": {"guid": "x"}}).encode()
+    headers = {
+        "X-UteamUP-Signature": _sign(webhook_entry.data[CONF_WEBHOOK_SECRET], body),
+        "X-UteamUP-Delivery": "delivery-untimed",
+        "Content-Type": "application/json",
+    }
+
+    assert (await client.post(url, data=body, headers=headers)).status == 401
+    await hass.async_block_till_done()
+    assert events == []
+
+
+async def test_the_last_legitimate_retry_is_still_accepted(
+    hass: HomeAssistant, hass_client_no_auth, webhook_entry
+) -> None:
+    """UteamUP retries a failed delivery after 30 s and then after 5 min, so the last attempt of a
+    delivery is 5 min 30 s old and has to stay inside the window."""
+    events = async_capture_events(hass, EVENT_UTEAMUP)
+    client = await hass_client_no_auth()
+    url = f"/api/webhook/{webhook_entry.data[CONF_WEBHOOK_ID]}"
+    late = _stamped(datetime.now(UTC) - timedelta(minutes=5, seconds=30))
+    body = json.dumps({"event": "workorder.completed", "timestamp": late, "data": {"guid": "x"}}).encode()
+    headers = {
+        "X-UteamUP-Signature": _sign(webhook_entry.data[CONF_WEBHOOK_SECRET], body),
+        "X-UteamUP-Delivery": "delivery-late",
+        "Content-Type": "application/json",
+    }
+
+    assert (await client.post(url, data=body, headers=headers)).status == 200
+    await hass.async_block_till_done()
+    assert len(events) == 1
+    assert events[0].data["event"] == "workorder.completed"
+
+
+def test_a_delivery_stays_remembered_for_the_whole_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Clock:
+        now = 1000.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    clock = _Clock()
+    monkeypatch.setattr(webhooks, "time", clock)
+    seen = SeenDeliveries(MAX_DELIVERY_AGE)
+    seen.add("delivery-1")
+
+    # A busy tenant must not push an unexpired delivery out of the window.
+    for index in range(1000):
+        seen.add(f"delivery-{index}")
+    assert seen.contains("delivery-1")
+
+    clock.now += MAX_DELIVERY_AGE.total_seconds() - 1
+    assert seen.contains("delivery-1")
+    clock.now += 2
+    assert not seen.contains("delivery-1")
 
 
 async def test_removing_the_entry_deletes_the_subscription(
